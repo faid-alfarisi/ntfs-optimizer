@@ -43,8 +43,11 @@ type VolumeLayout struct {
 	BitmapBytes    uint64
 
 	// 5. $ObjId:$O:INDEX_ALLOCATION
-	ObjIdLcn      uint64
-	ObjIdClusters uint64
+	ObjIdLcn            uint64
+	ObjIdClusters       uint64
+	ObjIdBitmapLcn      uint64
+	ObjIdBitmapClusters uint64
+	ObjIdBitmapBytes    uint64
 
 	// 6. $Secure:$SDH:INDEX_ALLOCATION
 	SdhLcn      uint64
@@ -151,6 +154,15 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.ObjIdClusters = (objIdBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.ObjIdClusters
 
+	// $ObjId:$O:BITMAP (Required as non-resident if bitmap exceeds resident space in Record 25, ~256 bytes)
+	objIdBmBytes := (layout.ObjIdClusters + 7) / 8
+	layout.ObjIdBitmapBytes = objIdBmBytes
+	if objIdBmBytes > 256 {
+		layout.ObjIdBitmapLcn = curLcn
+		layout.ObjIdBitmapClusters = (objIdBmBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
+		curLcn += layout.ObjIdBitmapClusters
+	}
+
 	// 6. $Secure:$SDH:INDEX_ALLOCATION
 	layout.SdhLcn = curLcn
 	layout.SdhClusters = 1 // 4096 bytes
@@ -164,7 +176,7 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	// 8. $MFT (User pre-sized)
 	mftBytes := cfg.MftSizeMB * 1024 * 1024
 	if mftBytes == 0 {
-		mftBytes = 128 * 1024 * 1024 // Default 128 MB
+		mftBytes = 512 * 1024 * 1024 // Default 512 MB
 	}
 	layout.MftLcn = curLcn
 	layout.MftClusters = (mftBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
@@ -173,7 +185,7 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	// 9. MFT RESERVED AREA (User pre-sized)
 	mftZoneBytes := cfg.MftZoneSizeMB * 1024 * 1024
 	if mftZoneBytes == 0 {
-		mftZoneBytes = 128 * 1024 * 1024 // Default 128 MB
+		mftZoneBytes = 200 * 1024 * 1024 // Default 200 MB
 	}
 	layout.MftZoneLcn = curLcn
 	layout.MftZoneClusters = (mftZoneBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)

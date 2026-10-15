@@ -108,6 +108,9 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 	markRange(layout.LogFileLcn, layout.LogFileClusters)
 	markRange(layout.BitmapLcn, layout.BitmapClusters)
 	markRange(layout.ObjIdLcn, layout.ObjIdClusters)
+	if layout.ObjIdBitmapClusters > 0 {
+		markRange(layout.ObjIdBitmapLcn, layout.ObjIdBitmapClusters)
+	}
 	markRange(layout.SdhLcn, layout.SdhClusters)
 	markRange(layout.SiiLcn, layout.SiiClusters)
 	markRange(layout.MftLcn, layout.MftClusters)
@@ -145,6 +148,13 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 			return fmt.Errorf("failed zeroing $ObjId clusters: %w", err)
 		}
 		objWritten += toWrite
+	}
+
+	if layout.ObjIdBitmapClusters > 0 {
+		zeroBmChunk := make([]byte, layout.ObjIdBitmapClusters*clusterSize)
+		if err := SeekAndWrite(h, clusterToOffset(layout.ObjIdBitmapLcn), zeroBmChunk); err != nil {
+			return fmt.Errorf("failed zeroing $ObjId bitmap clusters: %w", err)
+		}
 	}
 
 	// 7. Write $Secure:$SDH:INDEX_ALLOCATION (From user sample)

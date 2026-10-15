@@ -190,13 +190,20 @@ func BuildObjIdRecord(baseRec []byte, layout *VolumeLayout) ([]byte, error) {
 	newRec, cur, attrID = appendNonResidentAttr(newRec, cur, attrID, AttrTypeIndexAllocation, "$O", runs, allocSz, allocSz)
 
 	// Attr 0xB0: Bitmap "$O" (all zeros indicating 0 blocks currently active)
-	bmBytes := (layout.ObjIdClusters + 7) / 8
-	if bmBytes < 8 {
-		bmBytes = 8
+	if layout.ObjIdBitmapClusters > 0 {
+		// Non-resident bitmap for large index allocations (e.g. >= 128 MB)
+		bmRuns := []Run{{LCN: layout.ObjIdBitmapLcn, Length: layout.ObjIdBitmapClusters}}
+		bmAllocSz := layout.ObjIdBitmapClusters * uint64(layout.Config.ClusterSize)
+		newRec, cur, attrID = appendNonResidentAttr(newRec, cur, attrID, AttrTypeBitmap, "$O", bmRuns, bmAllocSz, layout.ObjIdBitmapBytes)
+	} else {
+		// Resident bitmap for small index allocations
+		bmBytes := layout.ObjIdBitmapBytes
+		if bmBytes < 8 {
+			bmBytes = 8
+		}
+		bmPayload := make([]byte, bmBytes)
+		newRec, cur, attrID = appendResidentAttr(newRec, cur, attrID, AttrTypeBitmap, "$O", bmPayload)
 	}
-	bmPayload := make([]byte, bmBytes)
-	// All bits 0: no active index blocks yet, matching NTFS pre-allocated standard
-	newRec, cur, attrID = appendResidentAttr(newRec, cur, attrID, AttrTypeBitmap, "$O", bmPayload)
 
 	// End marker
 	binary.LittleEndian.PutUint32(newRec[cur:cur+4], AttrTypeEnd)
@@ -226,6 +233,10 @@ func appendResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, name s
 	}
 	valOff := (24 + nameLen*2 + 7) &^ 7
 	totalLen := (valOff + len(content) + 7) &^ 7
+
+	if cur+totalLen+8 > len(rec) {
+		return rec, cur, attrID
+	}
 
 	binary.LittleEndian.PutUint32(rec[cur:cur+4], atype)
 	binary.LittleEndian.PutUint32(rec[cur+4:cur+8], uint32(totalLen))
@@ -257,6 +268,10 @@ func appendNonResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, nam
 	rlOff := (64 + nameLen*2 + 7) &^ 7
 	rl := EncodeRunlist(runs)
 	totalLen := (rlOff + len(rl) + 7) &^ 7
+
+	if cur+totalLen+8 > len(rec) {
+		return rec, cur, attrID
+	}
 
 	var totalClusters uint64 = 0
 	for _, r := range runs {

@@ -35,8 +35,8 @@ func formatSize(bytes uint64) string {
 func main() {
 	driveFlag := flag.String("drive", "", "Drive letter to format (e.g. E:)")
 	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or E:)")
-	mftSizeFlag := flag.Uint64("mft", 128, "Pre-sized MFT size in MB (default: 128)")
-	mftZoneFlag := flag.Uint64("mft-zone", 128, "Pre-sized MFT Reserved Area in MB (default: 128)")
+	mftSizeFlag := flag.Uint64("mft", 512, "Pre-sized MFT size in MB (default: 512)")
+	mftZoneFlag := flag.Uint64("mft-zone", 200, "Pre-sized MFT Reserved Area in MB (default: 200)")
 	objIdSizeFlag := flag.Uint64("objid", 4, "Pre-sized $ObjId:$O:INDEX_ALLOCATION in MB (default: 4)")
 	logFileSizeFlag := flag.Uint64("logfile", 64, "Pre-sized $LogFile in MB (default: 64)")
 	labelFlag := flag.String("label", "New Volume", "Volume label")
@@ -54,6 +54,16 @@ func main() {
 	}
 
 	isInteractive := *interactiveFlag || target == ""
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("\n[-] Unexpected Fatal Error: %v\n", r)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+	}()
 
 	if isInteractive {
 		printBanner()
@@ -153,7 +163,6 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	defer ntfs.CloseTarget(h, isVol)
 
 	totalSectors := totalBytes / ntfs.SectorSize
 	cfg := ntfs.LayoutConfig{
@@ -170,6 +179,7 @@ func main() {
 	layout, err := ntfs.CalculateLayout(cfg)
 	if err != nil {
 		fmt.Printf("[-] Layout error: %v\n", err)
+		ntfs.CloseTarget(h, isVol)
 		if isInteractive {
 			pauseAndExit(reader)
 		}
@@ -189,6 +199,7 @@ func main() {
 		confirm = strings.TrimSpace(confirm)
 		if confirm != "YES" {
 			fmt.Println("\n[*] Formatting aborted by user.")
+			ntfs.CloseTarget(h, isVol)
 			if isInteractive {
 				pauseAndExit(reader)
 			}
@@ -206,6 +217,9 @@ func main() {
 	}
 
 	err = ntfs.FormatVolume(h, layout, progress)
+	// Dismount and close volume handle so Windows can remount it cleanly
+	ntfs.CloseTarget(h, isVol)
+
 	if err != nil {
 		fmt.Printf("\n[-] Formatting failed: %v\n", err)
 		if isInteractive {
@@ -213,6 +227,9 @@ func main() {
 		}
 		os.Exit(1)
 	}
+
+	// Initialize standard Windows folders: $Recycle.Bin with User SID & desktop.ini, and System Volume Information
+	_ = ntfs.PopulatePostFormatStructures(target)
 
 	fmt.Println("\n[+] SUCCESS! NTFS Volume formatted successfully with exact sequential layout.")
 	fmt.Println("[+] Root permissions set to 'Everyone' Full Access.")
@@ -255,16 +272,19 @@ func printLayoutTable(l *ntfs.VolumeLayout) {
 	row(3, "$LogFile", l.LogFileLcn, l.LogFileClusters)
 	row(4, "$Bitmap", l.BitmapLcn, l.BitmapClusters)
 	row(5, "$ObjId:$O:INDEX_ALLOCATION", l.ObjIdLcn, l.ObjIdClusters)
-	row(6, "$SDH:INDEX_ALLOCATION", l.SdhLcn, l.SdhClusters)
-	row(7, "$SII:INDEX_ALLOCATION", l.SiiLcn, l.SiiClusters)
-	row(8, "$MFT (Pre-sized)", l.MftLcn, l.MftClusters)
-	row(9, "MFT RESERVED AREA", l.MftZoneLcn, l.MftZoneClusters)
-	row(10, "$MFT:BITMAP", l.MftBitmapLcn, l.MftBitmapClusters)
-	row(11, "$Secure:$SDS (from sample)", l.SdsLcn, l.SdsClusters)
-	row(12, "$UpCase", l.UpCaseLcn, l.UpCaseClusters)
-	row(13, "$AttrDef", l.AttrDefLcn, l.AttrDefClusters)
-	row(14, "$Root:$INDEX_ALLOCATION", l.RootIndexLcn, l.RootIndexClusters)
-	row(15, "User Data Free Space", l.DataStartLcn, l.FreeClusters)
+	if l.ObjIdBitmapClusters > 0 {
+		row(6, "$ObjId:$O:BITMAP", l.ObjIdBitmapLcn, l.ObjIdBitmapClusters)
+	}
+	row(7, "$SDH:INDEX_ALLOCATION", l.SdhLcn, l.SdhClusters)
+	row(8, "$SII:INDEX_ALLOCATION", l.SiiLcn, l.SiiClusters)
+	row(9, "$MFT (Pre-sized)", l.MftLcn, l.MftClusters)
+	row(10, "MFT RESERVED AREA", l.MftZoneLcn, l.MftZoneClusters)
+	row(11, "$MFT:BITMAP", l.MftBitmapLcn, l.MftBitmapClusters)
+	row(12, "$Secure:$SDS (from sample)", l.SdsLcn, l.SdsClusters)
+	row(13, "$UpCase", l.UpCaseLcn, l.UpCaseClusters)
+	row(14, "$AttrDef", l.AttrDefLcn, l.AttrDefClusters)
+	row(15, "$Root:$INDEX_ALLOCATION", l.RootIndexLcn, l.RootIndexClusters)
+	row(16, "User Data Free Space", l.DataStartLcn, l.FreeClusters)
 	fmt.Println("==========================================================================")
 }
 
