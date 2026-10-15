@@ -32,7 +32,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		layout.Config.SectorPerClust,
 		layout.MftLcn,
 		layout.MftMirrLcn,
-		0,
+		layout.Config.SerialNumber,
 	)
 	if err := SeekAndWrite(h, 0, vbr); err != nil {
 		return fmt.Errorf("failed writing boot sector: %w", err)
@@ -179,19 +179,13 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 	for i := 0; i < len(records); i++ {
 		copy(initMftBytes[i*MftRecordSize:], records[i])
 	}
-	emptyRec := BuildEmptyMftRecord(1)
-	for i := len(records); i < 256; i++ {
-		copy(initMftBytes[i*MftRecordSize:], emptyRec)
-	}
+	// Note: records len(records)..255 are left as clean all-zeros (unallocated)
 	if err := SeekAndWrite(h, clusterToOffset(layout.MftLcn), initMftBytes); err != nil {
 		return fmt.Errorf("failed writing initial MFT records: %w", err)
 	}
 
-	// Fill remaining pre-allocated MFT clusters with valid empty MFT records
-	emptyCluster := make([]byte, clusterSize)
-	for i := 0; i < int(clusterSize/MftRecordSize); i++ {
-		copy(emptyCluster[i*MftRecordSize:], emptyRec)
-	}
+	// Zero remaining pre-allocated MFT clusters
+	zeroChunk := make([]byte, chunkBytes) // all zeros
 	initClusters := uint64(len(initMftBytes)) / clusterSize
 	if layout.MftClusters > initClusters {
 		var mftWritten uint64 = initClusters
@@ -200,13 +194,9 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 			if toWrite > chunkClusters {
 				toWrite = chunkClusters
 			}
-			chunkBuf := make([]byte, toWrite*clusterSize)
-			for c := uint64(0); c < toWrite; c++ {
-				copy(chunkBuf[c*clusterSize:], emptyCluster)
-			}
 			offset := clusterToOffset(layout.MftLcn + mftWritten)
-			if err := SeekAndWrite(h, offset, chunkBuf); err != nil {
-				return fmt.Errorf("failed writing empty MFT records at cluster %d: %w", layout.MftLcn+mftWritten, err)
+			if err := SeekAndWrite(h, offset, zeroChunk[:toWrite*clusterSize]); err != nil {
+				return fmt.Errorf("failed zeroing MFT records at cluster %d: %w", layout.MftLcn+mftWritten, err)
 			}
 			mftWritten += toWrite
 		}

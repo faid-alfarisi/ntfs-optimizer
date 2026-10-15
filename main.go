@@ -165,6 +165,7 @@ func main() {
 	}
 
 	totalSectors := totalBytes / ntfs.SectorSize
+	existingSerial := ntfs.GetExistingVolumeSerial(h)
 	cfg := ntfs.LayoutConfig{
 		TotalSectors:   totalSectors,
 		BytesPerSector: ntfs.SectorSize,
@@ -174,6 +175,7 @@ func main() {
 		ObjIdSizeMB:    *objIdSizeFlag,
 		LogFileSizeMB:  *logFileSizeFlag,
 		VolumeLabel:    *labelFlag,
+		SerialNumber:   existingSerial,
 	}
 
 	layout, err := ntfs.CalculateLayout(cfg)

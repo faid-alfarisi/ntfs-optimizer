@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -201,6 +202,8 @@ func OpenTarget(target string) (syscall.Handle, uint64, bool, error) {
 		_ = syscall.DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
 		// Allow raw extended DASD I/O to avoid filesystem boundary restrictions
 		_ = syscall.DeviceIoControl(h, FSCTL_ALLOW_EXTENDED_DASD_IO, nil, 0, nil, 0, &bytesRet, nil)
+		// Settle delay to let Windows storage subsystem complete dismount transition
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Get total length
@@ -240,8 +243,51 @@ func CloseTarget(h syscall.Handle, isVolume bool) {
 	_ = syscall.CloseHandle(h)
 }
 
-// SeekAndWrite writes a byte buffer to the given byte offset on disk.
+// SeekAndWrite writes a byte buffer to the given byte offset on disk with retry on transient storage busy states.
 func SeekAndWrite(h syscall.Handle, offset uint64, buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		var newPos int64
+		r1, _, err := procSetFilePointerEx.Call(
+			uintptr(h),
+			uintptr(offset),
+			uintptr(unsafe.Pointer(&newPos)),
+			0, // FILE_BEGIN
+		)
+		if r1 == 0 {
+			return fmt.Errorf("SetFilePointerEx failed at offset %d: %w", offset, err)
+		}
+
+		var written uint32
+		r1, _, err = procWriteFile.Call(
+			uintptr(h),
+			uintptr(unsafe.Pointer(&buf[0])),
+			uintptr(len(buf)),
+			uintptr(unsafe.Pointer(&written)),
+			0,
+		)
+		if r1 != 0 && int(written) == len(buf) {
+			return nil
+		}
+
+		// Check if error is transient (ERROR_NOT_READY = 21, ERROR_BUSY = 170)
+		if errno, ok := err.(syscall.Errno); ok && (errno == 21 || errno == 170 || errno == 142) {
+			time.Sleep(time.Duration((attempt+1)*150) * time.Millisecond)
+			continue
+		}
+		if int(written) != len(buf) {
+			return fmt.Errorf("partial write at offset %d (newPos=%d): requested %d, wrote %d (err: %v)", offset, newPos, len(buf), written, err)
+		}
+		return fmt.Errorf("WriteFile failed at offset %d (newPos=%d): %w", offset, newPos, err)
+	}
+	return fmt.Errorf("WriteFile failed at offset %d after 5 attempts", offset)
+}
+
+// SeekAndRead reads a byte buffer from the given byte offset on disk.
+func SeekAndRead(h syscall.Handle, offset uint64, buf []byte) error {
 	if len(buf) == 0 {
 		return nil
 	}
@@ -256,19 +302,29 @@ func SeekAndWrite(h syscall.Handle, offset uint64, buf []byte) error {
 		return fmt.Errorf("SetFilePointerEx failed at offset %d: %w", offset, err)
 	}
 
-	var written uint32
-	r1, _, err = procWriteFile.Call(
+	var bytesRead uint32
+	r1, _, err = syscall.SyscallN(
+		modkernel32.NewProc("ReadFile").Addr(),
 		uintptr(h),
 		uintptr(unsafe.Pointer(&buf[0])),
 		uintptr(len(buf)),
-		uintptr(unsafe.Pointer(&written)),
+		uintptr(unsafe.Pointer(&bytesRead)),
 		0,
 	)
 	if r1 == 0 {
-		return fmt.Errorf("WriteFile failed at offset %d (newPos=%d): %w", offset, newPos, err)
-	}
-	if int(written) != len(buf) {
-		return fmt.Errorf("partial write at offset %d (newPos=%d): requested %d, wrote %d (err: %v)", offset, newPos, len(buf), written, err)
+		return fmt.Errorf("ReadFile failed at offset %d: %w", offset, err)
 	}
 	return nil
 }
+
+// GetExistingVolumeSerial reads the 64-bit volume serial number from the existing boot sector, if valid.
+func GetExistingVolumeSerial(h syscall.Handle) uint64 {
+	buf := make([]byte, 512)
+	if err := SeekAndRead(h, 0, buf); err == nil {
+		if buf[510] == 0x55 && buf[511] == 0xAA && string(buf[3:7]) == "NTFS" {
+			return binary.LittleEndian.Uint64(buf[72:80])
+		}
+	}
+	return 0
+}
+

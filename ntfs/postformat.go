@@ -44,10 +44,21 @@ func PopulatePostFormatStructures(target string) error {
 	}
 	volRoot := t + `\`
 
-	fmt.Printf("\n[*] Initializing standard Windows system folders on %s...\n", volRoot)
+	fmt.Printf("\n[*] Waiting for Windows to remount %s...\n", volRoot)
 
-	// Wait briefly for Windows automounter to detect the new filesystem
-	time.Sleep(300 * time.Millisecond)
+	// Wait up to 5 seconds for Windows mount manager to finish remounting the newly formatted volume
+	remounted := false
+	for attempt := 0; attempt < 25; attempt++ {
+		time.Sleep(200 * time.Millisecond)
+		if _, err := os.Stat(volRoot); err == nil {
+			remounted = true
+			break
+		}
+	}
+	if !remounted {
+		fmt.Printf(" [-] Note: Volume %s not immediately responsive, skipping folder creation.\n", volRoot)
+		return nil
+	}
 
 	// 1. Configure $Recycle.Bin with active User SID and desktop.ini
 	sid := GetCurrentUserSID()
@@ -65,18 +76,6 @@ func PopulatePostFormatStructures(target string) error {
 		_ = SetHiddenAndSystem(userDir)
 		_ = SetHiddenAndSystem(recycleDir)
 		fmt.Printf(" [+] Configured $Recycle.Bin with User SID (%s) and desktop.ini (Hidden+System).\n", sid)
-	}
-
-	// 2. Ensure System Volume Information
-	sviDir := filepath.Join(volRoot, "System Volume Information")
-	trackingLog := filepath.Join(sviDir, "tracking.log")
-	if _, err := os.Stat(sviDir); err == nil {
-		// Try creating tracking.log (empty on first format)
-		if f, err := os.OpenFile(trackingLog, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666); err == nil {
-			f.Close()
-			_ = SetHiddenAndSystem(trackingLog)
-			fmt.Println(" [+] Created empty tracking.log in System Volume Information.")
-		}
 	}
 
 	return nil

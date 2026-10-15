@@ -224,6 +224,106 @@ func BuildObjIdRecord(baseRec []byte, layout *VolumeLayout) ([]byte, error) {
 	return newRec, nil
 }
 
+// BuildVolumeRecord sets the user-specified Volume Label in Record 3 ($Volume) Attr 0x60.
+func BuildVolumeRecord(baseRec []byte, label string) ([]byte, error) {
+	d := make([]byte, MftRecordSize)
+	copy(d, baseRec)
+
+	if err := RemoveFixup(d); err != nil {
+		return nil, err
+	}
+
+	usaOffset := binary.LittleEndian.Uint16(d[4:6])
+	usaCount := binary.LittleEndian.Uint16(d[6:8])
+	off := int(binary.LittleEndian.Uint16(d[20:22]))
+
+	var stdInfo, fnInfo, volInfo, dataAttr []byte
+
+	for off < len(d) {
+		atype := binary.LittleEndian.Uint32(d[off : off+4])
+		alen := binary.LittleEndian.Uint32(d[off+4 : off+8])
+		if atype == AttrTypeEnd || alen == 0 || off+int(alen) > len(d) {
+			break
+		}
+		switch atype {
+		case AttrTypeStandardInformation:
+			stdInfo = make([]byte, alen)
+			copy(stdInfo, d[off:off+int(alen)])
+		case AttrTypeFileName:
+			fnInfo = make([]byte, alen)
+			copy(fnInfo, d[off:off+int(alen)])
+		case AttrTypeVolumeInformation:
+			volInfo = make([]byte, alen)
+			copy(volInfo, d[off:off+int(alen)])
+			// Ensure NTFS Version is 3.1 and flags are clean (0x0000)
+			valOff := int(binary.LittleEndian.Uint16(volInfo[20:22]))
+			if valOff+12 <= len(volInfo) {
+				volInfo[valOff+8] = 3 // Major version 3
+				volInfo[valOff+9] = 1 // Minor version 1
+				binary.LittleEndian.PutUint16(volInfo[valOff+10:valOff+12], 0x0000) // Flags = 0 (clean)
+			}
+		case AttrTypeData:
+			dataAttr = make([]byte, alen)
+			copy(dataAttr, d[off:off+int(alen)])
+		}
+		off += int(alen)
+	}
+
+	newRec := make([]byte, MftRecordSize)
+	copy(newRec[:56], d[:56])
+	cur := 56
+
+	if stdInfo != nil {
+		copy(newRec[cur:], stdInfo)
+		cur += len(stdInfo)
+	}
+	if fnInfo != nil {
+		copy(newRec[cur:], fnInfo)
+		cur += len(fnInfo)
+	}
+
+	// Attr 0x60: Volume Name (AttrID = 4)
+	u16 := utf16.Encode([]rune(label))
+	labelBytes := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		binary.LittleEndian.PutUint16(labelBytes[i*2:i*2+2], v)
+	}
+	newRec, cur, _ = appendResidentAttr(newRec, cur, 4, AttrTypeVolumeName, "", labelBytes)
+
+	// Attr 0x70: Volume Information (AttrID = 5)
+	if volInfo != nil {
+		binary.LittleEndian.PutUint16(volInfo[14:16], 5)
+		copy(newRec[cur:], volInfo)
+		cur += len(volInfo)
+	}
+
+	// Attr 0x80: Data (AttrID = 6)
+	if dataAttr != nil {
+		binary.LittleEndian.PutUint16(dataAttr[14:16], 6)
+		copy(newRec[cur:], dataAttr)
+		cur += len(dataAttr)
+	}
+
+	// End marker
+	binary.LittleEndian.PutUint32(newRec[cur:cur+4], AttrTypeEnd)
+	binary.LittleEndian.PutUint32(newRec[cur+4:cur+8], 0)
+	cur += 8
+
+	binary.LittleEndian.PutUint32(newRec[24:28], uint32(cur))
+	binary.LittleEndian.PutUint32(newRec[28:32], MftRecordSize)
+	binary.LittleEndian.PutUint16(newRec[40:42], 7) // Next Attr ID = 7
+
+	seq := binary.LittleEndian.Uint16(d[usaOffset : usaOffset+2])
+	if seq == 0 {
+		seq = 3
+	}
+	if err := ApplyFixup(newRec, usaOffset, usaCount, seq); err != nil {
+		return nil, err
+	}
+	return newRec, nil
+}
+
+
 func appendResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, name string, content []byte) ([]byte, int, uint16) {
 	u16 := utf16.Encode([]rune(name))
 	nameLen := len(u16)
@@ -308,7 +408,7 @@ func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 	records := make([][]byte, 64)
 	clustBytes := uint64(layout.Config.ClusterSize)
 
-	// Load records 0..15 and 24..26 from embedded templates; records 16..23 and 27..63 use valid empty records
+	// Load records 0..15 and 24..26 from embedded templates; records 16..23 and 27..63 are all-zero free records
 	for i := 0; i < 64; i++ {
 		if (i <= 15) || (i >= 24 && i <= 26) {
 			path := fmt.Sprintf("assets/system_records/rec_%02d.bin", i)
@@ -320,7 +420,7 @@ func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 				continue
 			}
 		}
-		records[i] = BuildEmptyMftRecord(1)
+		records[i] = make([]byte, MftRecordSize)
 	}
 
 	// Record 0: $MFT (Pre-sized to layout.MftClusters)
@@ -352,6 +452,17 @@ func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 		return nil, fmt.Errorf("error patching Record 2 $LogFile: %w", err)
 	}
 	records[RecordLogFile] = rec2
+
+	// Record 3: $Volume (Set user-specified Volume Label & clear dirty flags)
+	volLabel := layout.Config.VolumeLabel
+	if volLabel == "" {
+		volLabel = "New Volume"
+	}
+	rec3, err := BuildVolumeRecord(records[RecordVolume], volLabel)
+	if err != nil {
+		return nil, fmt.Errorf("error building Record 3 $Volume: %w", err)
+	}
+	records[RecordVolume] = rec3
 
 	// Record 4: $AttrDef
 	rec4, err := PatchNonResidentAttr(records[4], AttrTypeData, "", []Run{{LCN: layout.AttrDefLcn, Length: 1}}, clustBytes, 2560)

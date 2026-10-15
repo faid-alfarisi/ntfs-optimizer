@@ -16,6 +16,7 @@ type LayoutConfig struct {
 	ObjIdSizeMB   uint64
 	LogFileSizeMB uint64
 	VolumeLabel   string
+	SerialNumber  uint64
 }
 
 // VolumeLayout contains the calculated LCNs and cluster counts for every structure.
