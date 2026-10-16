@@ -264,29 +264,32 @@ func printLayoutTable(l *ntfs.VolumeLayout) {
 	fmt.Printf(" #   %-30s %-12s %-12s %-12s\n", "Metadata Structure", "Start LCN", "Clusters", "Size")
 	fmt.Println("--------------------------------------------------------------------------")
 
-	row := func(idx int, name string, start uint64, count uint64) {
+	idx := 1
+	row := func(name string, start uint64, count uint64) {
 		fmt.Printf("[%2d] %-30s %-12d %-12d %-12s\n",
 			idx, name, start, count, formatSize(count*uint64(l.Config.ClusterSize)))
+		idx++
 	}
 
-	row(1, "$Boot", l.BootLcn, l.BootClusters)
-	row(2, "$MFTMirr", l.MftMirrLcn, l.MftMirrClusters)
-	row(3, "$LogFile", l.LogFileLcn, l.LogFileClusters)
-	row(4, "$Bitmap", l.BitmapLcn, l.BitmapClusters)
-	row(5, "$ObjId:$O:INDEX_ALLOCATION", l.ObjIdLcn, l.ObjIdClusters)
+	row("$Boot", l.BootLcn, l.BootClusters)
+	row("$MFTMirr", l.MftMirrLcn, l.MftMirrClusters)
+	row("$LogFile", l.LogFileLcn, l.LogFileClusters)
+	row("$Bitmap", l.BitmapLcn, l.BitmapClusters)
+	row("$Extend\\$Deleted:$I30", l.DeletedLcn, l.DeletedClusters)
+	row("$ObjId:$O:INDEX_ALLOCATION", l.ObjIdLcn, l.ObjIdClusters)
+	row("$SDH:INDEX_ALLOCATION", l.SdhLcn, l.SdhClusters)
+	row("$SII:INDEX_ALLOCATION", l.SiiLcn, l.SiiClusters)
+	row("$MFT (Pre-sized)", l.MftLcn, l.MftClusters)
+	row("MFT RESERVED AREA", l.MftZoneLcn, l.MftZoneClusters)
+	row("$MFT:BITMAP", l.MftBitmapLcn, l.MftBitmapClusters)
+	row("$Secure:$SDS (from sample)", l.SdsLcn, l.SdsClusters)
+	row("$UpCase", l.UpCaseLcn, l.UpCaseClusters)
 	if l.ObjIdBitmapClusters > 0 {
-		row(6, "$ObjId:$O:BITMAP", l.ObjIdBitmapLcn, l.ObjIdBitmapClusters)
+		row("$ObjId:$O:BITMAP", l.ObjIdBitmapLcn, l.ObjIdBitmapClusters)
 	}
-	row(7, "$SDH:INDEX_ALLOCATION", l.SdhLcn, l.SdhClusters)
-	row(8, "$SII:INDEX_ALLOCATION", l.SiiLcn, l.SiiClusters)
-	row(9, "$MFT (Pre-sized)", l.MftLcn, l.MftClusters)
-	row(10, "MFT RESERVED AREA", l.MftZoneLcn, l.MftZoneClusters)
-	row(11, "$MFT:BITMAP", l.MftBitmapLcn, l.MftBitmapClusters)
-	row(12, "$Secure:$SDS (from sample)", l.SdsLcn, l.SdsClusters)
-	row(13, "$UpCase", l.UpCaseLcn, l.UpCaseClusters)
-	row(14, "$AttrDef", l.AttrDefLcn, l.AttrDefClusters)
-	row(15, "$Root:$INDEX_ALLOCATION", l.RootIndexLcn, l.RootIndexClusters)
-	row(16, "User Data Free Space", l.DataStartLcn, l.FreeClusters)
+	row("$AttrDef", l.AttrDefLcn, l.AttrDefClusters)
+	row("$Root:$INDEX_ALLOCATION", l.RootIndexLcn, l.RootIndexClusters)
+	row("User Data Free Space", l.DataStartLcn, l.FreeClusters)
 	fmt.Println("==========================================================================")
 }
 
@@ -325,4 +328,3 @@ func truncate(s string, maxLen int) string {
 	}
 	return s
 }
-

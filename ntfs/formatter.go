@@ -107,6 +107,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 	markRange(layout.MftMirrLcn, layout.MftMirrClusters)
 	markRange(layout.LogFileLcn, layout.LogFileClusters)
 	markRange(layout.BitmapLcn, layout.BitmapClusters)
+	markRange(layout.DeletedLcn, layout.DeletedClusters)
 	markRange(layout.ObjIdLcn, layout.ObjIdClusters)
 	if layout.ObjIdBitmapClusters > 0 {
 		markRange(layout.ObjIdBitmapLcn, layout.ObjIdBitmapClusters)
@@ -134,7 +135,14 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing volume $Bitmap: %w", err)
 	}
 
-	// 6. Write $ObjId:$O:INDEX_ALLOCATION (User pre-sized, contiguous unallocated space)
+	// 6. Write $Extend\$Deleted:$I30:INDEX_ALLOCATION (64 KB = 16 clusters right after $Bitmap)
+	report("Initializing $Extend\\$Deleted:$I30:INDEX_ALLOCATION...", layout.DeletedLcn)
+	deletedBuf := make([]byte, layout.DeletedClusters*clusterSize)
+	if err := SeekAndWrite(h, clusterToOffset(layout.DeletedLcn), deletedBuf); err != nil {
+		return fmt.Errorf("failed zeroing $Extend\\$Deleted clusters: %w", err)
+	}
+
+	// 7. Write $ObjId:$O:INDEX_ALLOCATION (User pre-sized, contiguous unallocated space)
 	report("Initializing $ObjId:$O:INDEX_ALLOCATION...", layout.ObjIdLcn)
 	zeroObjChunk := make([]byte, chunkBytes)
 	var objWritten uint64 = 0
@@ -157,7 +165,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		}
 	}
 
-	// 7. Write $Secure:$SDH:INDEX_ALLOCATION (From user sample)
+	// 8. Write $Secure:$SDH:INDEX_ALLOCATION (From user sample)
 	report("Writing $Secure:$SDH:INDEX_ALLOCATION...", layout.SdhLcn)
 	sdhBuf := make([]byte, clusterSize)
 	copy(sdhBuf, SecureSdhBin)
@@ -165,7 +173,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing $SDH: %w", err)
 	}
 
-	// 8. Write $Secure:$SII:INDEX_ALLOCATION (From user sample)
+	// 9. Write $Secure:$SII:INDEX_ALLOCATION (From user sample)
 	report("Writing $Secure:$SII:INDEX_ALLOCATION...", layout.SiiLcn)
 	siiBuf := make([]byte, clusterSize)
 	copy(siiBuf, SecureSiiBin)
@@ -173,7 +181,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing $SII: %w", err)
 	}
 
-	// 9. Write $MFT (User pre-sized)
+	// 10. Write $MFT (User pre-sized)
 	report("Writing $MFT primary records...", layout.MftLcn)
 	initMftBytes := make([]byte, 256*MftRecordSize)
 	for i := 0; i < len(records); i++ {
@@ -202,7 +210,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		}
 	}
 
-	// 10. Clear MFT RESERVED AREA (User pre-sized)
+	// 11. Clear MFT RESERVED AREA (User pre-sized)
 	report("Reserving MFT Zone area...", layout.MftZoneLcn)
 	zeroZoneChunk := make([]byte, chunkBytes)
 	var zoneWritten uint64 = 0
@@ -218,15 +226,15 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		zoneWritten += toWrite
 	}
 
-	// 11. Write $MFT:BITMAP
+	// 12. Write $MFT:BITMAP
 	report("Writing $MFT:BITMAP...", layout.MftBitmapLcn)
 	mftBitmapBuf := make([]byte, layout.MftBitmapClusters*clusterSize)
-	// Records 0..15 allocated (0xFF, 0xFF), 16..23 unallocated (0x00), 24..26 allocated (0x07), 27..end unallocated (0x00)
+	// Records 0..15 allocated (0xFF, 0xFF), 16..23 unallocated (0x00), 24..26 & 29 allocated (0x27), 32..end unallocated (0x00)
 	if len(mftBitmapBuf) >= 5 {
 		mftBitmapBuf[0] = 0xFF
 		mftBitmapBuf[1] = 0xFF
 		mftBitmapBuf[2] = 0x00
-		mftBitmapBuf[3] = 0x07
+		mftBitmapBuf[3] = 0x27
 		mftBitmapBuf[4] = 0x00
 	}
 	if err := SeekAndWrite(h, clusterToOffset(layout.MftBitmapLcn), mftBitmapBuf); err != nil {

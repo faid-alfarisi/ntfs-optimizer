@@ -103,18 +103,16 @@ func BuildEmptyMftRecord(seq uint16) []byte {
 	binary.LittleEndian.PutUint16(rec[4:6], usaOffset)
 	binary.LittleEndian.PutUint16(rec[6:8], usaCount)
 	binary.LittleEndian.PutUint16(rec[16:18], seq)
-	binary.LittleEndian.PutUint16(rec[18:20], 0)          // Link count
-	binary.LittleEndian.PutUint16(rec[20:22], 56)         // Attr offset
-	binary.LittleEndian.PutUint16(rec[22:24], 0)          // Flags = 0 (NOT IN USE)
-	binary.LittleEndian.PutUint32(rec[24:28], 64)         // Bytes used
+	binary.LittleEndian.PutUint16(rec[18:20], 0)  // Link count
+	binary.LittleEndian.PutUint16(rec[20:22], 56) // Attr offset
+	binary.LittleEndian.PutUint16(rec[22:24], 0)  // Flags = 0 (NOT IN USE)
+	binary.LittleEndian.PutUint32(rec[24:28], 64) // Bytes used
 	binary.LittleEndian.PutUint32(rec[28:32], MftRecordSize)
-	binary.LittleEndian.PutUint16(rec[40:42], 1)          // Next attr id
+	binary.LittleEndian.PutUint16(rec[40:42], 1)           // Next attr id
 	binary.LittleEndian.PutUint32(rec[56:60], AttrTypeEnd) // 0xFFFFFFFF
 	_ = ApplyFixup(rec, usaOffset, usaCount, seq)
 	return rec
 }
-
-
 
 // BuildObjIdRecord updates MFT record 25 ($ObjId) from base template, pre-sizing with $O:INDEX_ALLOCATION.
 func BuildObjIdRecord(baseRec []byte, layout *VolumeLayout) ([]byte, error) {
@@ -258,8 +256,8 @@ func BuildVolumeRecord(baseRec []byte, label string) ([]byte, error) {
 			// Ensure NTFS Version is 3.1 and flags are clean (0x0000)
 			valOff := int(binary.LittleEndian.Uint16(volInfo[20:22]))
 			if valOff+12 <= len(volInfo) {
-				volInfo[valOff+8] = 3 // Major version 3
-				volInfo[valOff+9] = 1 // Minor version 1
+				volInfo[valOff+8] = 3                                               // Major version 3
+				volInfo[valOff+9] = 1                                               // Minor version 1
 				binary.LittleEndian.PutUint16(volInfo[valOff+10:valOff+12], 0x0000) // Flags = 0 (clean)
 			}
 		case AttrTypeData:
@@ -322,7 +320,6 @@ func BuildVolumeRecord(baseRec []byte, label string) ([]byte, error) {
 	}
 	return newRec, nil
 }
-
 
 func appendResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, name string, content []byte) ([]byte, int, uint16) {
 	u16 := utf16.Encode([]rune(name))
@@ -403,14 +400,154 @@ func appendNonResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, nam
 	return rec, cur + totalLen, attrID + 1
 }
 
+// extractFileNamePayload returns the resident $FILE_NAME (0x30) attribute value and sequence number from a raw MFT record.
+func extractFileNamePayload(rec []byte) ([]byte, uint16, error) {
+	d := make([]byte, len(rec))
+	copy(d, rec)
+	if err := RemoveFixup(d); err != nil {
+		return nil, 0, err
+	}
+	seq := binary.LittleEndian.Uint16(d[16:18])
+	off := int(binary.LittleEndian.Uint16(d[20:22]))
+	for off+8 <= len(d) {
+		atype := binary.LittleEndian.Uint32(d[off : off+4])
+		alen := binary.LittleEndian.Uint32(d[off+4 : off+8])
+		if atype == AttrTypeEnd || alen == 0 || off+int(alen) > len(d) {
+			break
+		}
+		if atype == AttrTypeFileName && d[off+8] == 0 {
+			valLen := int(binary.LittleEndian.Uint32(d[off+16 : off+20]))
+			valOff := int(binary.LittleEndian.Uint16(d[off+20 : off+22]))
+			if off+valOff+valLen <= len(d) {
+				payload := make([]byte, valLen)
+				copy(payload, d[off+valOff:off+valOff+valLen])
+				return payload, seq, nil
+			}
+		}
+		off += int(alen)
+	}
+	return nil, 0, fmt.Errorf("$FILE_NAME attribute not found in record")
+}
+
+// BuildExtendRecord updates Record 11 ($Extend) so its $I30 IndexRoot contains entries for
+// $Deleted (29), $ObjId (25), $Quota (24), and $Reparse (26) in sorted order.
+func BuildExtendRecord(baseRec []byte, childRecords map[uint64][]byte) ([]byte, error) {
+	d := make([]byte, MftRecordSize)
+	copy(d, baseRec)
+	if err := RemoveFixup(d); err != nil {
+		return nil, err
+	}
+
+	usaOffset := binary.LittleEndian.Uint16(d[4:6])
+	usaCount := binary.LittleEndian.Uint16(d[6:8])
+	off := int(binary.LittleEndian.Uint16(d[20:22]))
+
+	var stdInfo, fnInfo []byte
+	for off+8 <= len(d) {
+		atype := binary.LittleEndian.Uint32(d[off : off+4])
+		alen := binary.LittleEndian.Uint32(d[off+4 : off+8])
+		if atype == AttrTypeEnd || alen == 0 || off+int(alen) > len(d) {
+			break
+		}
+		if atype == AttrTypeStandardInformation {
+			stdInfo = make([]byte, alen)
+			copy(stdInfo, d[off:off+int(alen)])
+		} else if atype == AttrTypeFileName {
+			fnInfo = make([]byte, alen)
+			copy(fnInfo, d[off:off+int(alen)])
+		}
+		off += int(alen)
+	}
+
+	if stdInfo == nil || fnInfo == nil {
+		return nil, fmt.Errorf("Attr 0x10 or 0x30 missing in Record 11 ($Extend)")
+	}
+
+	// Build $I30 IndexRoot entries in exact NTFS $UpCase alphabetical order:
+	// $Deleted (29), $ObjId (25), $Quota (24), $Reparse (26)
+	orderedRecNums := []uint64{RecordDeleted, RecordObjId, RecordQuota, RecordReparse}
+	var entriesBuf []byte
+	for _, rnum := range orderedRecNums {
+		crec, ok := childRecords[rnum]
+		if !ok || len(crec) == 0 {
+			continue
+		}
+		fnPayload, cseq, err := extractFileNamePayload(crec)
+		if err != nil {
+			return nil, fmt.Errorf("extracting $FILE_NAME for record %d: %w", rnum, err)
+		}
+		valLen := len(fnPayload)
+		entryLen := (16 + valLen + 7) &^ 7
+		entry := make([]byte, entryLen)
+		mftRef := (rnum & 0xFFFFFFFFFFFF) | (uint64(cseq) << 48)
+		binary.LittleEndian.PutUint64(entry[0:8], mftRef)
+		binary.LittleEndian.PutUint16(entry[8:10], uint16(entryLen))
+		binary.LittleEndian.PutUint16(entry[10:12], uint16(valLen))
+		binary.LittleEndian.PutUint32(entry[12:16], 0) // flags = 0 (leaf entry)
+		copy(entry[16:], fnPayload)
+		entriesBuf = append(entriesBuf, entry...)
+	}
+
+	// End entry (16 bytes, flags = 2 INDEX_ENTRY_END)
+	endEntry := make([]byte, 16)
+	binary.LittleEndian.PutUint16(endEntry[8:10], 16)
+	binary.LittleEndian.PutUint32(endEntry[12:16], 2)
+	entriesBuf = append(entriesBuf, endEntry...)
+
+	// IndexRoot Header (16 bytes) + NodeHeader (16 bytes) + entriesBuf
+	nodeTotalSz := 16 + len(entriesBuf)
+	irPayload := make([]byte, 16+nodeTotalSz)
+	binary.LittleEndian.PutUint32(irPayload[0:4], AttrTypeFileName)  // 0x30
+	binary.LittleEndian.PutUint32(irPayload[4:8], CollationFileName) // 1
+	binary.LittleEndian.PutUint32(irPayload[8:12], IndexBlockSize)   // 4096
+	irPayload[12] = 1                                                // clusters per index block
+	// NodeHeader
+	binary.LittleEndian.PutUint32(irPayload[16:20], 16)                  // entries offset
+	binary.LittleEndian.PutUint32(irPayload[20:24], uint32(nodeTotalSz)) // total size
+	binary.LittleEndian.PutUint32(irPayload[24:28], uint32(nodeTotalSz)) // alloc size
+	irPayload[28] = 0                                                    // leaf node
+	copy(irPayload[32:], entriesBuf)
+
+	newRec := make([]byte, MftRecordSize)
+	copy(newRec[:56], d[:56])
+	cur := 56
+
+	copy(newRec[cur:], stdInfo)
+	cur += len(stdInfo)
+
+	copy(newRec[cur:], fnInfo)
+	cur += len(fnInfo)
+
+	// Attr 0x90: IndexRoot "$I30" (attrID = 4)
+	newRec, cur, _ = appendResidentAttr(newRec, cur, 4, AttrTypeIndexRoot, "$I30", irPayload)
+
+	// End marker
+	binary.LittleEndian.PutUint32(newRec[cur:cur+4], AttrTypeEnd)
+	binary.LittleEndian.PutUint32(newRec[cur+4:cur+8], 0)
+	cur += 8
+
+	binary.LittleEndian.PutUint32(newRec[24:28], uint32(cur))
+	binary.LittleEndian.PutUint32(newRec[28:32], MftRecordSize)
+	binary.LittleEndian.PutUint16(newRec[40:42], 5) // nextAttrId = 5
+
+	seq := binary.LittleEndian.Uint16(d[usaOffset : usaOffset+2])
+	if seq == 0 {
+		seq = 11
+	}
+	if err := ApplyFixup(newRec, usaOffset, usaCount, seq); err != nil {
+		return nil, err
+	}
+	return newRec, nil
+}
+
 // GenerateSystemRecords prepares all 64 initial MFT records with updated runlists.
 func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 	records := make([][]byte, 64)
 	clustBytes := uint64(layout.Config.ClusterSize)
 
-	// Load records 0..15 and 24..26 from embedded templates; records 16..23 and 27..63 are all-zero free records
+	// Load records 0..15, 24..26, and 29 ($Deleted) from embedded templates; remaining records are all-zero free records
 	for i := 0; i < 64; i++ {
-		if (i <= 15) || (i >= 24 && i <= 26) {
+		if (i <= 15) || (i >= 24 && i <= 26) || i == RecordDeleted {
 			path := fmt.Sprintf("assets/system_records/rec_%02d.bin", i)
 			data, err := SystemRecordsFS.ReadFile(path)
 			if err == nil && len(data) == MftRecordSize && string(data[:4]) == "FILE" {
@@ -521,6 +658,25 @@ func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 		return nil, fmt.Errorf("error building Record 25 $ObjId: %w", err)
 	}
 	records[RecordObjId] = rec25
+
+	// Record 29: $Deleted ($Extend\$Deleted with 64 KB $I30:INDEX_ALLOCATION right after $Bitmap, realSize=0, initSize=0)
+	rec29, err := PatchNonResidentAttr(records[RecordDeleted], AttrTypeIndexAllocation, "$I30", []Run{{LCN: layout.DeletedLcn, Length: layout.DeletedClusters}}, layout.DeletedClusters*clustBytes, 0)
+	if err != nil {
+		return nil, fmt.Errorf("error patching Record 29 $Deleted: %w", err)
+	}
+	records[RecordDeleted] = rec29
+
+	// Record 11: $Extend (Update $I30 IndexRoot to include $Deleted, $ObjId, $Quota, $Reparse)
+	rec11, err := BuildExtendRecord(records[RecordExtend], map[uint64][]byte{
+		RecordDeleted: records[RecordDeleted],
+		RecordObjId:   records[RecordObjId],
+		RecordQuota:   records[RecordQuota],
+		RecordReparse: records[RecordReparse],
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error building Record 11 $Extend: %w", err)
+	}
+	records[RecordExtend] = rec11
 
 	return records, nil
 }

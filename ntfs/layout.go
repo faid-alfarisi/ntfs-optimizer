@@ -43,35 +43,39 @@ type VolumeLayout struct {
 	BitmapClusters uint64
 	BitmapBytes    uint64
 
-	// 5. $ObjId:$O:INDEX_ALLOCATION
+	// 5. $Extend\$Deleted:$I30:INDEX_ALLOCATION
+	DeletedLcn      uint64
+	DeletedClusters uint64
+
+	// 6. $ObjId:$O:INDEX_ALLOCATION
 	ObjIdLcn            uint64
 	ObjIdClusters       uint64
 	ObjIdBitmapLcn      uint64
 	ObjIdBitmapClusters uint64
 	ObjIdBitmapBytes    uint64
 
-	// 6. $Secure:$SDH:INDEX_ALLOCATION
+	// 7. $Secure:$SDH:INDEX_ALLOCATION
 	SdhLcn      uint64
 	SdhClusters uint64
 
-	// 7. $Secure:$SII:INDEX_ALLOCATION
+	// 8. $Secure:$SII:INDEX_ALLOCATION
 	SiiLcn      uint64
 	SiiClusters uint64
 
-	// 8. $MFT
+	// 9. $MFT
 	MftLcn      uint64
 	MftClusters uint64
 
-	// 9. MFT RESERVED AREA
+	// 10. MFT RESERVED AREA
 	MftZoneLcn      uint64
 	MftZoneClusters uint64
 
-	// 10. $MFT:BITMAP
+	// 11. $MFT:BITMAP
 	MftBitmapLcn      uint64
 	MftBitmapClusters uint64
 	MftBitmapBytes    uint64
 
-	// 11. Subsequent metadata in order:
+	// 12. Subsequent metadata in order:
 	// $Secure:$SDS
 	SdsLcn      uint64
 	SdsClusters uint64
@@ -146,7 +150,13 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.BitmapClusters = (bitmapBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.BitmapClusters
 
-	// 5. $ObjId:$O:INDEX_ALLOCATION (User pre-sized)
+	// 5. $Extend\$Deleted:$I30:INDEX_ALLOCATION (64 KB = 16 clusters)
+	deletedBytes := uint64(65536)
+	layout.DeletedLcn = curLcn
+	layout.DeletedClusters = (deletedBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
+	curLcn += layout.DeletedClusters
+
+	// 6. $ObjId:$O:INDEX_ALLOCATION (User pre-sized)
 	objIdBytes := cfg.ObjIdSizeMB * 1024 * 1024
 	if objIdBytes == 0 {
 		objIdBytes = 4 * 1024 * 1024 // Default 4 MB
@@ -155,26 +165,20 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.ObjIdClusters = (objIdBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.ObjIdClusters
 
-	// $ObjId:$O:BITMAP (Required as non-resident if bitmap exceeds resident space in Record 25, ~256 bytes)
 	objIdBmBytes := (layout.ObjIdClusters + 7) / 8
 	layout.ObjIdBitmapBytes = objIdBmBytes
-	if objIdBmBytes > 256 {
-		layout.ObjIdBitmapLcn = curLcn
-		layout.ObjIdBitmapClusters = (objIdBmBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
-		curLcn += layout.ObjIdBitmapClusters
-	}
 
-	// 6. $Secure:$SDH:INDEX_ALLOCATION
+	// 7. $Secure:$SDH:INDEX_ALLOCATION
 	layout.SdhLcn = curLcn
 	layout.SdhClusters = 1 // 4096 bytes
 	curLcn += layout.SdhClusters
 
-	// 7. $Secure:$SII:INDEX_ALLOCATION
+	// 8. $Secure:$SII:INDEX_ALLOCATION
 	layout.SiiLcn = curLcn
 	layout.SiiClusters = 1 // 4096 bytes
 	curLcn += layout.SiiClusters
 
-	// 8. $MFT (User pre-sized)
+	// 9. $MFT (User pre-sized)
 	mftBytes := cfg.MftSizeMB * 1024 * 1024
 	if mftBytes == 0 {
 		mftBytes = 512 * 1024 * 1024 // Default 512 MB
@@ -183,7 +187,7 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.MftClusters = (mftBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.MftClusters
 
-	// 9. MFT RESERVED AREA (User pre-sized)
+	// 10. MFT RESERVED AREA (User pre-sized)
 	mftZoneBytes := cfg.MftZoneSizeMB * 1024 * 1024
 	if mftZoneBytes == 0 {
 		mftZoneBytes = 200 * 1024 * 1024 // Default 200 MB
@@ -192,7 +196,7 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.MftZoneClusters = (mftZoneBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.MftZoneClusters
 
-	// 10. $MFT:BITMAP (Bitmap for MFT records: MftClusters * 4 records)
+	// 11. $MFT:BITMAP (Bitmap for MFT records: MftClusters * 4 records)
 	totalMftRecords := layout.MftClusters * uint64(cfg.ClusterSize/MftRecordSize)
 	mftBitmapBytes := (totalMftRecords + 7) / 8
 	layout.MftBitmapBytes = mftBitmapBytes
@@ -200,7 +204,7 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.MftBitmapClusters = (mftBitmapBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.MftBitmapClusters
 
-	// 11. Subsequent metadata in order:
+	// 12. Subsequent movable metadata in order:
 	// $Secure:$SDS (266,240 bytes = 65 clusters)
 	sdsBytes := uint64(len(SecureSdsBin))
 	if sdsBytes == 0 {
@@ -218,6 +222,13 @@ func CalculateLayout(cfg LayoutConfig) (*VolumeLayout, error) {
 	layout.UpCaseLcn = curLcn
 	layout.UpCaseClusters = (upCaseBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
 	curLcn += layout.UpCaseClusters
+
+	// $ObjId:$O:BITMAP (Placed here with movable metadata if non-resident, matching Drive E: layout)
+	if objIdBmBytes > 256 {
+		layout.ObjIdBitmapLcn = curLcn
+		layout.ObjIdBitmapClusters = (objIdBmBytes + uint64(cfg.ClusterSize) - 1) / uint64(cfg.ClusterSize)
+		curLcn += layout.ObjIdBitmapClusters
+	}
 
 	// $AttrDef (2560 bytes = 1 cluster)
 	layout.AttrDefLcn = curLcn

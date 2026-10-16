@@ -22,12 +22,12 @@ const (
 
 // Common NTFS Collation Rules
 const (
-	CollationBinary      = 0
-	CollationFileName    = 1
-	CollationUnicode     = 2
-	CollationUlongs      = 16
+	CollationBinary       = 0
+	CollationFileName     = 1
+	CollationUnicode      = 2
+	CollationUlongs       = 16
 	CollationSecurityHash = 18
-	CollationObjectId    = 19
+	CollationObjectId     = 19
 )
 
 // Record & Cluster standard constants
@@ -41,22 +41,23 @@ const (
 
 // Standard MFT Record numbers
 const (
-	RecordMFT       = 0
-	RecordMFTMirr   = 1
-	RecordLogFile   = 2
-	RecordVolume    = 3
-	RecordAttrDef   = 4
-	RecordRoot      = 5
-	RecordBitmap    = 6
-	RecordBoot      = 7
-	RecordBadClust  = 8
-	RecordSecure    = 9
-	RecordUpCase    = 10
-	RecordExtend    = 11
-	RecordQuota     = 24
-	RecordObjId     = 25
-	RecordReparse   = 26
+	RecordMFT        = 0
+	RecordMFTMirr    = 1
+	RecordLogFile    = 2
+	RecordVolume     = 3
+	RecordAttrDef    = 4
+	RecordRoot       = 5
+	RecordBitmap     = 6
+	RecordBoot       = 7
+	RecordBadClust   = 8
+	RecordSecure     = 9
+	RecordUpCase     = 10
+	RecordExtend     = 11
+	RecordQuota      = 24
+	RecordObjId      = 25
+	RecordReparse    = 26
 	RecordRmMetadata = 27
+	RecordDeleted    = 29
 )
 
 // Run represents a single non-resident data extent in clusters.
@@ -64,4 +65,3 @@ type Run struct {
 	LCN    uint64 // Logical Cluster Number (absolute)
 	Length uint64 // Number of clusters in this extent
 }
-
