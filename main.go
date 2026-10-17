@@ -33,8 +33,9 @@ func formatSize(bytes uint64) string {
 }
 
 func main() {
-	driveFlag := flag.String("drive", "", "Drive letter to format (e.g. E:)")
-	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or E:)")
+	modeFlag := flag.String("mode", "", "Operation mode: 'rearrange' (non-destructive) or 'format' (destructive)")
+	driveFlag := flag.String("drive", "", "Drive letter to format or rearrange (e.g. F:)")
+	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or F:)")
 	mftSizeFlag := flag.Uint64("mft", 512, "Pre-sized MFT size in MB (default: 512)")
 	mftZoneFlag := flag.Uint64("mft-zone", 200, "Pre-sized MFT Reserved Area in MB (default: 200)")
 	objIdSizeFlag := flag.Uint64("objid", 4, "Pre-sized $ObjId:$O:INDEX_ALLOCATION in MB (default: 4)")
@@ -47,7 +48,6 @@ func main() {
 
 	reader := bufio.NewReader(os.Stdin)
 
-	// Check if CLI flags were provided
 	target := *targetFlag
 	if target == "" && *driveFlag != "" {
 		target = *driveFlag
@@ -65,11 +65,28 @@ func main() {
 		}
 	}()
 
+	mode := strings.ToLower(*modeFlag)
+
 	if isInteractive {
 		printBanner()
 
-		// 1. List volumes and physical drives
-		fmt.Println("[*] Scanning system for online drives and offline disks...")
+		if mode == "" {
+			fmt.Println(" Select Operation Mode:")
+			fmt.Println("  [1] Rearrange / Optimize Existing NTFS Volume (Non-Destructive)")
+			fmt.Println("  [2] Clean Sequential Format (Destructive)")
+			fmt.Println("--------------------------------------------------------------------------")
+			fmt.Print("Choose mode [1 or 2, default: 1]: ")
+			modeInput, _ := reader.ReadString('\n')
+			modeInput = strings.TrimSpace(modeInput)
+			if modeInput == "2" {
+				mode = "format"
+			} else {
+				mode = "rearrange"
+			}
+		}
+
+		// 1. List targets
+		fmt.Println("\n[*] Scanning system for online drives...")
 		volumes, _ := ntfs.ListVolumes()
 		disks := ntfs.ListDisks()
 
@@ -104,7 +121,7 @@ func main() {
 			idx++
 		}
 
-		if len(disks) > 0 {
+		if mode == "format" && len(disks) > 0 {
 			fmt.Println("\nAvailable Physical Drives (Online / Offline / VHD):")
 			fmt.Println("---------------------------------------------------------------------------------")
 			fmt.Printf(" #   %-22s %-15s\n", "Device Path", "Total Size")
@@ -131,7 +148,7 @@ func main() {
 			return
 		}
 
-		fmt.Print("\nSelect target number to format: ")
+		fmt.Printf("\nSelect target number to %s: ", mode)
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 		choiceIdx, err := strconv.Atoi(input)
@@ -144,13 +161,10 @@ func main() {
 		selectedChoice := choices[choiceIdx-1]
 		target = selectedChoice.Target
 		fmt.Printf("\n[+] Selected: %s\n", selectedChoice.DisplayName)
+	}
 
-		// Ask for pre-sizes
-		*mftSizeFlag = promptUint(reader, "Pre-size for $MFT (MB)", *mftSizeFlag)
-		*mftZoneFlag = promptUint(reader, "Pre-size for MFT RESERVED AREA (MB)", *mftZoneFlag)
-		*objIdSizeFlag = promptUint(reader, "Pre-size for $ObjId:$O:INDEX_ALLOCATION (MB)", *objIdSizeFlag)
-		*logFileSizeFlag = promptUint(reader, "Pre-size for $LogFile (MB)", *logFileSizeFlag)
-		*labelFlag = promptString(reader, "Volume Label", *labelFlag)
+	if mode == "" {
+		mode = "rearrange"
 	}
 
 	// Open target
@@ -164,52 +178,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	totalSectors := totalBytes / ntfs.SectorSize
-	existingSerial := ntfs.GetExistingVolumeSerial(h)
-	cfg := ntfs.LayoutConfig{
-		TotalSectors:   totalSectors,
-		BytesPerSector: ntfs.SectorSize,
-		SectorPerClust: ntfs.DefaultSectorsPerClust,
-		MftSizeMB:      *mftSizeFlag,
-		MftZoneSizeMB:  *mftZoneFlag,
-		ObjIdSizeMB:    *objIdSizeFlag,
-		LogFileSizeMB:  *logFileSizeFlag,
-		VolumeLabel:    *labelFlag,
-		SerialNumber:   existingSerial,
-	}
-
-	layout, err := ntfs.CalculateLayout(cfg)
-	if err != nil {
-		fmt.Printf("[-] Layout error: %v\n", err)
-		ntfs.CloseTarget(h, isVol)
-		if isInteractive {
-			pauseAndExit(reader)
-		}
-		os.Exit(1)
-	}
-
-	// Display Sequential Layout Summary
-	printLayoutTable(layout)
-
-	if !*yesFlag {
-		fmt.Println("\n==========================================================================")
-		fmt.Println(" WARNING: ALL DATA ON THE TARGET WILL BE COMPLETELY DESTROYED!")
-		fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
-		fmt.Println("==========================================================================")
-		fmt.Print("Type 'YES' to confirm and proceed with formatting: ")
-		confirm, _ := reader.ReadString('\n')
-		confirm = strings.TrimSpace(confirm)
-		if confirm != "YES" {
-			fmt.Println("\n[*] Formatting aborted by user.")
-			ntfs.CloseTarget(h, isVol)
-			if isInteractive {
-				pauseAndExit(reader)
-			}
-			return
-		}
-	}
-
-	fmt.Println("\n[*] Starting Custom Sequential NTFS Format...")
 	progress := func(phase string, curCluster uint64, totalClusters uint64) {
 		pct := float64(curCluster) / float64(totalClusters) * 100.0
 		if pct > 100.0 {
@@ -218,24 +186,174 @@ func main() {
 		fmt.Printf(" -> [%5.1f%%] %s\n", pct, phase)
 	}
 
-	err = ntfs.FormatVolume(h, layout, progress)
-	// Dismount and close volume handle so Windows can remount it cleanly
-	ntfs.CloseTarget(h, isVol)
-
-	if err != nil {
-		fmt.Printf("\n[-] Formatting failed: %v\n", err)
-		if isInteractive {
-			pauseAndExit(reader)
+	if mode == "rearrange" {
+		// Rearrange Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures and calculating minimum required sizes...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
 		}
-		os.Exit(1)
+
+		// Display current metadata status vs minimums
+		printAnalysisTable(analysis)
+
+		if isInteractive {
+			*mftSizeFlag = promptUintWithMin(reader, "Pre-size for $MFT (MB)", analysis.CurrentMftMB, analysis.MinMftMB)
+			*mftZoneFlag = promptUintWithMin(reader, "Pre-size for MFT RESERVED AREA (MB)", analysis.CurrentMftZoneMB, analysis.MinMftZoneMB)
+			*objIdSizeFlag = promptUintWithMin(reader, "Pre-size for $ObjId:$O:INDEX_ALLOCATION (MB)", analysis.CurrentObjIdMB, analysis.MinObjIdMB)
+			*logFileSizeFlag = promptUintWithMin(reader, "Pre-size for $LogFile (MB)", analysis.CurrentLogFileMB, analysis.MinLogFileMB)
+			defLabel := analysis.VolumeLabel
+			if defLabel == "" {
+				defLabel = *labelFlag
+			}
+			*labelFlag = promptString(reader, "Volume Label", defLabel)
+		} else {
+			// Enforce minimums in non-interactive mode
+			if *mftSizeFlag < analysis.MinMftMB {
+				*mftSizeFlag = analysis.MinMftMB
+			}
+			if *logFileSizeFlag < analysis.MinLogFileMB {
+				*logFileSizeFlag = analysis.MinLogFileMB
+			}
+			if *objIdSizeFlag < analysis.MinObjIdMB {
+				*objIdSizeFlag = analysis.MinObjIdMB
+			}
+		}
+
+		cfg := ntfs.LayoutConfig{
+			TotalSectors:   analysis.TotalSectors,
+			BytesPerSector: uint16(analysis.BytesPerSector),
+			SectorPerClust: analysis.SectorPerClust,
+			MftSizeMB:      *mftSizeFlag,
+			MftZoneSizeMB:  *mftZoneFlag,
+			ObjIdSizeMB:    *objIdSizeFlag,
+			LogFileSizeMB:  *logFileSizeFlag,
+			VolumeLabel:    *labelFlag,
+			SerialNumber:   analysis.SerialNumber,
+		}
+
+		layout, err := ntfs.CalculateLayout(cfg)
+		if err != nil {
+			fmt.Printf("[-] Layout error: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		printLayoutTable(layout)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: IN-PLACE REARRANGEMENT WILL RELOCATE METADATA AND COLLIDING FILES")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'YES' to confirm and proceed with rearrangement: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.TrimSpace(confirm)
+			if confirm != "YES" {
+				fmt.Println("\n[*] Rearrangement aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting Non-Destructive In-Place NTFS Rearrangement...")
+		err = ntfs.RearrangeVolume(h, analysis, layout, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Rearrangement failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! NTFS Volume metadata rearranged into exact sequential front layout.")
+		fmt.Println("[+] All existing user files and directory trees preserved intact.")
+
+	} else {
+		// Format Mode (Destructive)
+		if isInteractive {
+			*mftSizeFlag = promptUint(reader, "Pre-size for $MFT (MB)", *mftSizeFlag)
+			*mftZoneFlag = promptUint(reader, "Pre-size for MFT RESERVED AREA (MB)", *mftZoneFlag)
+			*objIdSizeFlag = promptUint(reader, "Pre-size for $ObjId:$O:INDEX_ALLOCATION (MB)", *objIdSizeFlag)
+			*logFileSizeFlag = promptUint(reader, "Pre-size for $LogFile (MB)", *logFileSizeFlag)
+			*labelFlag = promptString(reader, "Volume Label", *labelFlag)
+		}
+
+		totalSectors := totalBytes / ntfs.SectorSize
+		existingSerial := ntfs.GetExistingVolumeSerial(h)
+		cfg := ntfs.LayoutConfig{
+			TotalSectors:   totalSectors,
+			BytesPerSector: ntfs.SectorSize,
+			SectorPerClust: ntfs.DefaultSectorsPerClust,
+			MftSizeMB:      *mftSizeFlag,
+			MftZoneSizeMB:  *mftZoneFlag,
+			ObjIdSizeMB:    *objIdSizeFlag,
+			LogFileSizeMB:  *logFileSizeFlag,
+			VolumeLabel:    *labelFlag,
+			SerialNumber:   existingSerial,
+		}
+
+		layout, err := ntfs.CalculateLayout(cfg)
+		if err != nil {
+			fmt.Printf("[-] Layout error: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		printLayoutTable(layout)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: ALL DATA ON THE TARGET WILL BE COMPLETELY DESTROYED!")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'YES' to confirm and proceed with formatting: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.TrimSpace(confirm)
+			if confirm != "YES" {
+				fmt.Println("\n[*] Formatting aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting Custom Sequential NTFS Format...")
+		err = ntfs.FormatVolume(h, layout, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Formatting failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		_ = ntfs.PopulatePostFormatStructures(target)
+
+		fmt.Println("\n[+] SUCCESS! NTFS Volume formatted successfully with exact sequential layout.")
+		fmt.Println("[+] Root permissions set to 'Everyone' Full Access.")
+		fmt.Println("[+] All unmovable system metadata placed contiguously at the front of the disk.")
 	}
-
-	// Initialize standard Windows folders: $Recycle.Bin with User SID & desktop.ini, and System Volume Information
-	_ = ntfs.PopulatePostFormatStructures(target)
-
-	fmt.Println("\n[+] SUCCESS! NTFS Volume formatted successfully with exact sequential layout.")
-	fmt.Println("[+] Root permissions set to 'Everyone' Full Access.")
-	fmt.Println("[+] All unmovable system metadata placed contiguously at the front of the disk.")
 
 	if isInteractive {
 		pauseAndExit(reader)
@@ -247,11 +365,35 @@ func printBanner() {
 	fmt.Println("      CUSTOM SEQUENTIAL NTFS OPTIMIZER & FORMATTER (Go Native)            ")
 	fmt.Println("==========================================================================")
 	fmt.Println(" Features:")
+	fmt.Println("  - Mode [1]: Rearrange / Optimize existing volume (Preserves files)")
+	fmt.Println("  - Mode [2]: Clean sequential format (Zero-fragmentation layout)")
 	fmt.Println("  - Unmovable NTFS Metadata in sequential front order")
 	fmt.Println("  - Pre-sized $MFT, MFT RESERVED AREA, and $ObjId:$O:INDEX_ALLOCATION")
 	fmt.Println("  - Root directory with 'Everyone' Full Access permissions")
-	fmt.Println("  - Supports Online Volumes, Offlined Disks, VHDs, and Raw Physical Drives")
 	fmt.Println("==========================================================================")
+}
+
+func printAnalysisTable(a *ntfs.VolumeAnalysis) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("                   CURRENT VOLUME METADATA CONFIGURATION                  ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Total Capacity         : %s (%d clusters, %d sectors)\n",
+		formatSize(a.TotalBytes), a.TotalClusters, a.TotalSectors)
+	fmt.Printf(" Cluster Size           : %d bytes\n", a.ClusterSize)
+	fmt.Printf(" Total Allocated Records: %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Printf(" %-24s %-16s %-16s %-16s\n", "Structure", "Current Size", "Minimum Size", "Recommended")
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Printf(" %-24s %-16s %-16s %-16s\n", "$MFT", fmt.Sprintf("%d MB", a.CurrentMftMB), fmt.Sprintf("%d MB", a.MinMftMB), "512 MB")
+	fmt.Printf(" %-24s %-16s %-16s %-16s\n", "MFT Reserved Area", fmt.Sprintf("%d MB", a.CurrentMftZoneMB), fmt.Sprintf("%d MB", a.MinMftZoneMB), "200 MB")
+	fmt.Printf(" %-24s %-16s %-16s %-16s\n", "$ObjId:$O", fmt.Sprintf("%d MB", a.CurrentObjIdMB), fmt.Sprintf("%d MB", a.MinObjIdMB), "4 MB")
+	fmt.Printf(" %-24s %-16s %-16s %-16s\n", "$LogFile", fmt.Sprintf("%d MB", a.CurrentLogFileMB), fmt.Sprintf("%d MB", a.MinLogFileMB), "64 MB")
+	fmt.Println("==========================================================================")
+	fmt.Println(" Note: Sizes cannot be set smaller than their Minimum Size.")
+	fmt.Println("--------------------------------------------------------------------------")
 }
 
 func printLayoutTable(l *ntfs.VolumeLayout) {
@@ -291,6 +433,30 @@ func printLayoutTable(l *ntfs.VolumeLayout) {
 	row("$Root:$INDEX_ALLOCATION", l.RootIndexLcn, l.RootIndexClusters)
 	row("User Data Free Space", l.DataStartLcn, l.FreeClusters)
 	fmt.Println("==========================================================================")
+}
+
+func promptUintWithMin(r *bufio.Reader, label string, defaultVal uint64, minVal uint64) uint64 {
+	for {
+		fmt.Printf("%s [Current/Default: %d MB, Min: %d MB]: ", label, defaultVal, minVal)
+		text, _ := r.ReadString('\n')
+		text = strings.TrimSpace(text)
+		if text == "" {
+			if defaultVal < minVal {
+				defaultVal = minVal
+			}
+			return defaultVal
+		}
+		val, err := strconv.ParseUint(text, 10, 64)
+		if err != nil {
+			fmt.Println("[-] Invalid number. Please enter a valid positive integer.")
+			continue
+		}
+		if val < minVal {
+			fmt.Printf("[-] Error: Value (%d MB) cannot be smaller than minimum required size of %d MB. Please enter a larger size.\n", val, minVal)
+			continue
+		}
+		return val
+	}
 }
 
 func promptUint(r *bufio.Reader, label string, defaultVal uint64) uint64 {

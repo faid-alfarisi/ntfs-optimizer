@@ -5,10 +5,10 @@ if h == -1:
     print("Cannot open F: for write:", ctypes.GetLastError())
     exit(1)
 
-# First format with ntfs-formatter with standard settings
+# First format with ntfs-optimizer with standard settings
 ctypes.windll.kernel32.CloseHandle(h)
 
-subprocess.run([r'.\ntfs-formatter.exe', '--drive', 'F:', '--yes'], check=True)
+subprocess.run([r'.\ntfs-optimizer.exe', '-mode', 'format', '-target', 'F:', '-yes'], check=True)
 
 # Now open F: and read Record 25 ($ObjId)
 h = ctypes.windll.kernel32.CreateFileW(r'\\.\F:', 0xC0000000, 3, None, 3, 0, None)

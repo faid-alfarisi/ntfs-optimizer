@@ -1,9 +1,9 @@
 @echo off
 cd /d "%~dp0"
-echo Building ntfs-formatter.exe...
-go build -ldflags="-s -w" -o ntfs-formatter.exe .
+echo Building ntfs-optimizer.exe...
+go build -ldflags="-s -w" -o ntfs-optimizer.exe .
 if %ERRORLEVEL% EQU 0 (
-    echo [OK] Build successful: ntfs-formatter.exe
+    echo [OK] Build successful: ntfs-optimizer.exe
 ) else (
     echo [ERROR] Build failed!
 )
