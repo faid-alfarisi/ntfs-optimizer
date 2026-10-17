@@ -254,10 +254,10 @@ func main() {
 			fmt.Println(" WARNING: IN-PLACE REARRANGEMENT WILL RELOCATE METADATA AND COLLIDING FILES")
 			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
 			fmt.Println("==========================================================================")
-			fmt.Print("Type 'YES' to confirm and proceed with rearrangement: ")
+			fmt.Print("Type 'yes' to confirm and proceed with rearrangement: ")
 			confirm, _ := reader.ReadString('\n')
-			confirm = strings.TrimSpace(confirm)
-			if confirm != "YES" {
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
 				fmt.Println("\n[*] Rearrangement aborted by user.")
 				ntfs.CloseTarget(h, isVol)
 				if isInteractive {
@@ -323,10 +323,10 @@ func main() {
 			fmt.Println(" WARNING: ALL DATA ON THE TARGET WILL BE COMPLETELY DESTROYED!")
 			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
 			fmt.Println("==========================================================================")
-			fmt.Print("Type 'YES' to confirm and proceed with formatting: ")
+			fmt.Print("Type 'yes' to confirm and proceed with formatting: ")
 			confirm, _ := reader.ReadString('\n')
-			confirm = strings.TrimSpace(confirm)
-			if confirm != "YES" {
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
 				fmt.Println("\n[*] Formatting aborted by user.")
 				ntfs.CloseTarget(h, isVol)
 				if isInteractive {
