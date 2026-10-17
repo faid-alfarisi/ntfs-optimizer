@@ -58,6 +58,15 @@ const (
 	RecordReparse    = 26
 	RecordRmMetadata = 27
 	RecordDeleted    = 29
+
+	// Standard initial root folders & files (Records 36..42)
+	RecordSVI               = 36
+	RecordWPSettings        = 37
+	RecordIndexerVolumeGuid = 38
+	RecordTrackingLog       = 39
+	RecordRecycleBin        = 40
+	RecordRecycleBinSID     = 41
+	RecordDesktopIni        = 42
 )
 
 // Run represents a single non-resident data extent in clusters.

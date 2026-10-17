@@ -253,12 +253,12 @@ func BuildVolumeRecord(baseRec []byte, label string) ([]byte, error) {
 		case AttrTypeVolumeInformation:
 			volInfo = make([]byte, alen)
 			copy(volInfo, d[off:off+int(alen)])
-			// Ensure NTFS Version is 3.1 and flags are clean (0x0000)
+			// Ensure NTFS Version is 3.1 and flags are clean (0x0080, matching reference drive E: and native Windows format)
 			valOff := int(binary.LittleEndian.Uint16(volInfo[20:22]))
 			if valOff+12 <= len(volInfo) {
 				volInfo[valOff+8] = 3                                               // Major version 3
 				volInfo[valOff+9] = 1                                               // Minor version 1
-				binary.LittleEndian.PutUint16(volInfo[valOff+10:valOff+12], 0x0000) // Flags = 0 (clean)
+				binary.LittleEndian.PutUint16(volInfo[valOff+10:valOff+12], 0x0080) // Flags = 0x0080 (clean)
 			}
 		case AttrTypeData:
 			dataAttr = make([]byte, alen)
@@ -344,7 +344,11 @@ func appendResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, name s
 	binary.LittleEndian.PutUint16(rec[cur+14:cur+16], attrID)
 	binary.LittleEndian.PutUint32(rec[cur+16:cur+20], uint32(len(content)))
 	binary.LittleEndian.PutUint16(rec[cur+20:cur+22], uint16(valOff))
-	rec[cur+22] = 0
+	if atype == AttrTypeFileName {
+		rec[cur+22] = 1 // RESIDENT_ATTR_IS_INDEXED
+	} else {
+		rec[cur+22] = 0
+	}
 
 	if nameLen > 0 {
 		for i, v := range u16 {
@@ -677,6 +681,12 @@ func GenerateSystemRecords(layout *VolumeLayout) ([][]byte, error) {
 		return nil, fmt.Errorf("error building Record 11 $Extend: %w", err)
 	}
 	records[RecordExtend] = rec11
+
+	// Records 36..42: System Volume Information (with WPSettings.dat, IndexerVolumeGuid, tracking.log)
+	// and $Recycle.Bin (with <UserSID> and desktop.ini), using exact Security IDs 261..266
+	if err := BuildInitialRootFoldersRecords(records, GetCurrentUserSID()); err != nil {
+		return nil, fmt.Errorf("error building initial root folders (records 36..42): %w", err)
+	}
 
 	return records, nil
 }

@@ -63,15 +63,8 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing $MFTMirr: %w", err)
 	}
 
-	// 4. Write $LogFile (LCN 3) - valid RSTR restart pages in first 2 clusters, filled with 0xFF
+	// 4. Write $LogFile (LCN 3) - filled entirely with 0xFF so Windows initializes clean transaction log on mount
 	report("Initializing $LogFile (transaction log)...", layout.LogFileLcn)
-	logFileTotalBytes := layout.LogFileClusters * clusterSize
-	rstrPages := prepareLogFileRestart(LogFileRestartBin, logFileTotalBytes)
-	if err := SeekAndWrite(h, clusterToOffset(layout.LogFileLcn), rstrPages); err != nil {
-		return fmt.Errorf("failed writing $LogFile restart area: %w", err)
-	}
-
-	restartClusters := uint64(len(rstrPages)) / clusterSize
 	chunkClusters := uint64(256) // 1 MB chunks
 	chunkBytes := chunkClusters * clusterSize
 	ffChunk := make([]byte, chunkBytes)
@@ -79,7 +72,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		ffChunk[i] = 0xFF
 	}
 
-	var writtenClusters uint64 = restartClusters
+	var writtenClusters uint64
 	for writtenClusters < layout.LogFileClusters {
 		toWrite := layout.LogFileClusters - writtenClusters
 		if toWrite > chunkClusters {
@@ -165,10 +158,13 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		}
 	}
 
+	// Prepare $Secure streams ($SDS, $SDH, $SII) patched with active user SID
+	sdsStream, sdhStream, siiStream := BuildSecureStreams(GetCurrentUserSID())
+
 	// 8. Write $Secure:$SDH:INDEX_ALLOCATION (From user sample)
 	report("Writing $Secure:$SDH:INDEX_ALLOCATION...", layout.SdhLcn)
 	sdhBuf := make([]byte, clusterSize)
-	copy(sdhBuf, SecureSdhBin)
+	copy(sdhBuf, sdhStream)
 	if err := SeekAndWrite(h, clusterToOffset(layout.SdhLcn), sdhBuf); err != nil {
 		return fmt.Errorf("failed writing $SDH: %w", err)
 	}
@@ -176,7 +172,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 	// 9. Write $Secure:$SII:INDEX_ALLOCATION (From user sample)
 	report("Writing $Secure:$SII:INDEX_ALLOCATION...", layout.SiiLcn)
 	siiBuf := make([]byte, clusterSize)
-	copy(siiBuf, SecureSiiBin)
+	copy(siiBuf, siiStream)
 	if err := SeekAndWrite(h, clusterToOffset(layout.SiiLcn), siiBuf); err != nil {
 		return fmt.Errorf("failed writing $SII: %w", err)
 	}
@@ -229,27 +225,32 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 	// 12. Write $MFT:BITMAP
 	report("Writing $MFT:BITMAP...", layout.MftBitmapLcn)
 	mftBitmapBuf := make([]byte, layout.MftBitmapClusters*clusterSize)
-	// Records 0..15 allocated (0xFF, 0xFF), 16..23 unallocated (0x00), 24..26 & 29 allocated (0x27), 32..end unallocated (0x00)
-	if len(mftBitmapBuf) >= 5 {
+	// Byte 0..1: Records 0..15 allocated (0xFF, 0xFF)
+	// Byte 2: Records 16..23 unallocated (0x00)
+	// Byte 3: Records 24..26 & 29 allocated (0x27); 27..28 & 30..31 left free for Windows TxF ($RmMetadata, $Repair, $TxfLog, $Txf)
+	// Byte 4: Records 32..35 left free for Windows TxF ($Tops, $TxfLog.blf, $TxfLogContainer01/02); Records 36..39 allocated (0xF0)
+	// Byte 5: Records 40..42 allocated (0x07)
+	if len(mftBitmapBuf) >= 6 {
 		mftBitmapBuf[0] = 0xFF
 		mftBitmapBuf[1] = 0xFF
 		mftBitmapBuf[2] = 0x00
 		mftBitmapBuf[3] = 0x27
-		mftBitmapBuf[4] = 0x00
+		mftBitmapBuf[4] = 0xF0
+		mftBitmapBuf[5] = 0x07
 	}
 	if err := SeekAndWrite(h, clusterToOffset(layout.MftBitmapLcn), mftBitmapBuf); err != nil {
 		return fmt.Errorf("failed writing $MFT:BITMAP: %w", err)
 	}
 
-	// 12. Write $Secure:$SDS (260 KB from user sample)
+	// 13. Write $Secure:$SDS (260 KB from user sample, patched with active User SID)
 	report("Writing $Secure:$SDS data stream...", layout.SdsLcn)
 	sdsBuf := make([]byte, layout.SdsClusters*clusterSize)
-	copy(sdsBuf, SecureSdsBin)
+	copy(sdsBuf, sdsStream)
 	if err := SeekAndWrite(h, clusterToOffset(layout.SdsLcn), sdsBuf); err != nil {
 		return fmt.Errorf("failed writing $Secure:$SDS: %w", err)
 	}
 
-	// 13. Write $UpCase (128 KB uppercase table)
+	// 14. Write $UpCase (128 KB uppercase table)
 	report("Writing $UpCase table...", layout.UpCaseLcn)
 	upCaseBuf := make([]byte, layout.UpCaseClusters*clusterSize)
 	copy(upCaseBuf, UpCaseBin)
@@ -257,7 +258,7 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing $UpCase: %w", err)
 	}
 
-	// 14. Write $AttrDef (Attribute definitions table)
+	// 15. Write $AttrDef (Attribute definitions table)
 	report("Writing $AttrDef table...", layout.AttrDefLcn)
 	attrDefBuf := make([]byte, clusterSize)
 	copy(attrDefBuf, AttrDefBin)
@@ -265,10 +266,14 @@ func FormatVolume(h syscall.Handle, layout *VolumeLayout, progress ProgressFunc)
 		return fmt.Errorf("failed writing $AttrDef: %w", err)
 	}
 
-	// 15. Write $Root:$INDEX_ALLOCATION (From user sample)
+	// 16. Write $Root:$INDEX_ALLOCATION (Includes System Volume Information and $Recycle.Bin)
 	report("Writing $Root directory index...", layout.RootIndexLcn)
+	rootIndx, err := BuildRootIndxBlock(RootIndxBin, records[RecordSVI], records[RecordRecycleBin])
+	if err != nil {
+		return fmt.Errorf("failed building $Root index block: %w", err)
+	}
 	rootIndxBuf := make([]byte, clusterSize)
-	copy(rootIndxBuf, RootIndxBin)
+	copy(rootIndxBuf, rootIndx)
 	if err := SeekAndWrite(h, clusterToOffset(layout.RootIndexLcn), rootIndxBuf); err != nil {
 		return fmt.Errorf("failed writing $Root index: %w", err)
 	}

@@ -198,12 +198,8 @@ func OpenTarget(target string) (syscall.Handle, uint64, bool, error) {
 		var bytesRet uint32
 		// Lock volume
 		_ = syscall.DeviceIoControl(h, FSCTL_LOCK_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
-		// Dismount volume
-		_ = syscall.DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
 		// Allow raw extended DASD I/O to avoid filesystem boundary restrictions
 		_ = syscall.DeviceIoControl(h, FSCTL_ALLOW_EXTENDED_DASD_IO, nil, 0, nil, 0, &bytesRet, nil)
-		// Settle delay to let Windows storage subsystem complete dismount transition
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Get total length
@@ -233,11 +229,12 @@ func FlushTarget(h syscall.Handle) {
 	_ = syscall.FlushFileBuffers(h)
 }
 
-// CloseTarget unlocks volume if needed and closes handle.
+// CloseTarget dismounts, unlocks volume if needed, and closes handle.
 func CloseTarget(h syscall.Handle, isVolume bool) {
 	_ = syscall.FlushFileBuffers(h)
 	if isVolume {
 		var bytesRet uint32
+		_ = syscall.DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
 		_ = syscall.DeviceIoControl(h, FSCTL_UNLOCK_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
 	}
 	_ = syscall.CloseHandle(h)

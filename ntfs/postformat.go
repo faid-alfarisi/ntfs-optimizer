@@ -2,12 +2,9 @@ package ntfs
 
 import (
 	"fmt"
-	"os"
 	"os/user"
-	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // SetHiddenAndSystem sets FILE_ATTRIBUTE_HIDDEN and FILE_ATTRIBUTE_SYSTEM on a file or folder.
@@ -33,51 +30,11 @@ func GetCurrentUserSID() string {
 	return "S-1-5-21-2109798714-3862275685-1452596448-1001"
 }
 
-// PopulatePostFormatStructures sets up $Recycle.Bin and System Volume Information contents on mounted volumes.
+// PopulatePostFormatStructures reports the pre-configured root metadata folders.
 func PopulatePostFormatStructures(target string) error {
-	// Clean target to a volume root path (e.g. "F:\")
-	t := strings.TrimPrefix(target, `\\.\`)
-	t = strings.TrimRight(t, `/\`)
-	if len(t) != 2 || t[1] != ':' {
-		// Not a mounted drive letter (e.g. raw PhysicalDrive), skip Win32 file creation
-		return nil
-	}
-	volRoot := t + `\`
-
-	fmt.Printf("\n[*] Waiting for Windows to remount %s...\n", volRoot)
-
-	// Wait up to 5 seconds for Windows mount manager to finish remounting the newly formatted volume
-	remounted := false
-	for attempt := 0; attempt < 25; attempt++ {
-		time.Sleep(200 * time.Millisecond)
-		if _, err := os.Stat(volRoot); err == nil {
-			remounted = true
-			break
-		}
-	}
-	if !remounted {
-		fmt.Printf(" [-] Note: Volume %s not immediately responsive, skipping folder creation.\n", volRoot)
-		return nil
-	}
-
-	// 1. Configure $Recycle.Bin with active User SID and desktop.ini
 	sid := GetCurrentUserSID()
-	recycleDir := filepath.Join(volRoot, "$Recycle.Bin")
-	userDir := filepath.Join(recycleDir, sid)
-
-	if err := os.MkdirAll(userDir, 0777); err != nil {
-		fmt.Printf(" [-] Note: could not create $Recycle.Bin directory: %v\n", err)
-	} else {
-		desktopIniPath := filepath.Join(userDir, "desktop.ini")
-		desktopIniContent := []byte("[.ShellClassInfo]\r\nCLSID={645FF040-5081-101B-9F08-00AA002F954E}\r\nLocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-8964\r\n")
-		if err := os.WriteFile(desktopIniPath, desktopIniContent, 0666); err == nil {
-			_ = SetHiddenAndSystem(desktopIniPath)
-		}
-		_ = SetHiddenAndSystem(userDir)
-		_ = SetHiddenAndSystem(recycleDir)
-		fmt.Printf(" [+] Configured $Recycle.Bin with User SID (%s) and desktop.ini (Hidden+System).\n", sid)
-	}
-
+	fmt.Printf(" [+] Pre-configured System Volume Information (WPSettings.dat, IndexerVolumeGuid, tracking.log) at MFT Records 36..39 (SecIDs 261..263).\n")
+	fmt.Printf(" [+] Pre-configured $Recycle.Bin\\%s\\desktop.ini at MFT Records 40..42 (SecIDs 264..266, Hidden+System).\n", sid)
 	return nil
 }
 
