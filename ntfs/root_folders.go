@@ -41,22 +41,24 @@ func buildFileNamePayload(parentRec uint64, parentSeq uint16, allocSz uint64, re
 	return buf
 }
 
-func buildLeafIndexRootI30(children []struct {
-	recNum uint64
-	seq    uint16
-	fn     []byte
-}) []byte {
+type IndexChild struct {
+	RecNum uint64
+	Seq    uint16
+	Fn     []byte
+}
+
+func BuildLeafIndexRootI30(children []IndexChild) []byte {
 	var entriesBuf []byte
 	for _, c := range children {
-		valLen := len(c.fn)
+		valLen := len(c.Fn)
 		entryLen := (16 + valLen + 7) &^ 7
 		entry := make([]byte, entryLen)
-		mftRef := (c.recNum & 0xFFFFFFFFFFFF) | (uint64(c.seq) << 48)
+		mftRef := (c.RecNum & 0xFFFFFFFFFFFF) | (uint64(c.Seq) << 48)
 		binary.LittleEndian.PutUint64(entry[0:8], mftRef)
 		binary.LittleEndian.PutUint16(entry[8:10], uint16(entryLen))
 		binary.LittleEndian.PutUint16(entry[10:12], uint16(valLen))
 		binary.LittleEndian.PutUint32(entry[12:16], 0) // leaf entry
-		copy(entry[16:], c.fn)
+		copy(entry[16:], c.Fn)
 		entriesBuf = append(entriesBuf, entry...)
 	}
 	endEntry := make([]byte, 16)
@@ -178,14 +180,10 @@ func BuildInitialRootFoldersRecords(records [][]byte, userSID string) error {
 
 	// --- Record 36: System Volume Information (SecID 261) ---
 	fnSVI := buildFileNamePayload(RecordRoot, 5, 0, 0, 0x10002006, 0, "System Volume Information")
-	sviIndexRoot := buildLeafIndexRootI30([]struct {
-		recNum uint64
-		seq    uint16
-		fn     []byte
-	}{
-		{recNum: RecordIndexerVolumeGuid, seq: 1, fn: fnIdx},
-		{recNum: RecordTrackingLog, seq: 1, fn: fnTrk},
-		{recNum: RecordWPSettings, seq: 1, fn: fnWP},
+	sviIndexRoot := BuildLeafIndexRootI30([]IndexChild{
+		{RecNum: RecordIndexerVolumeGuid, Seq: 1, Fn: fnIdx},
+		{RecNum: RecordTrackingLog, Seq: 1, Fn: fnTrk},
+		{RecNum: RecordWPSettings, Seq: 1, Fn: fnWP},
 	})
 	rec36 := buildMftRecordHeader(RecordSVI, 1, 0x0003)
 	cur = 56
@@ -211,12 +209,8 @@ func BuildInitialRootFoldersRecords(records [][]byte, userSID string) error {
 
 	// --- Record 41: $Recycle.Bin\<UserSID> (SecID 265) ---
 	fnSid := buildFileNamePayload(RecordRecycleBin, 1, 0, 0, 0x10002006, 0, userSID)
-	sidIndexRoot := buildLeafIndexRootI30([]struct {
-		recNum uint64
-		seq    uint16
-		fn     []byte
-	}{
-		{recNum: RecordDesktopIni, seq: 1, fn: fnIniForIdx},
+	sidIndexRoot := BuildLeafIndexRootI30([]IndexChild{
+		{RecNum: RecordDesktopIni, Seq: 1, Fn: fnIniForIdx},
 	})
 	rec41 := buildMftRecordHeader(RecordRecycleBinSID, 1, 0x0003)
 	cur = 56
@@ -229,12 +223,8 @@ func BuildInitialRootFoldersRecords(records [][]byte, userSID string) error {
 
 	// --- Record 40: $Recycle.Bin (SecID 264) ---
 	fnRecBin := buildFileNamePayload(RecordRoot, 5, 0, 0, 0x10002006, 0, "$Recycle.Bin")
-	recBinIndexRoot := buildLeafIndexRootI30([]struct {
-		recNum uint64
-		seq    uint16
-		fn     []byte
-	}{
-		{recNum: RecordRecycleBinSID, seq: 1, fn: fnSid},
+	recBinIndexRoot := BuildLeafIndexRootI30([]IndexChild{
+		{RecNum: RecordRecycleBinSID, Seq: 1, Fn: fnSid},
 	})
 	rec40 := buildMftRecordHeader(RecordRecycleBin, 1, 0x0003)
 	cur = 56
@@ -264,11 +254,11 @@ func BuildRootIndxBlock(baseIndx []byte, recSVI, recRecycleBin []byte) ([]byte, 
 		seq = 1
 	}
 
-	fnSVI, seqSVI, err := extractFileNamePayload(recSVI)
+	fnSVI, seqSVI, err := ExtractFileNamePayload(recSVI)
 	if err != nil {
 		return nil, err
 	}
-	fnRecBin, seqRecBin, err := extractFileNamePayload(recRecycleBin)
+	fnRecBin, seqRecBin, err := ExtractFileNamePayload(recRecycleBin)
 	if err != nil {
 		return nil, err
 	}

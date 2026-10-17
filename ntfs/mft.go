@@ -404,8 +404,8 @@ func appendNonResidentAttr(rec []byte, cur int, attrID uint16, atype uint32, nam
 	return rec, cur + totalLen, attrID + 1
 }
 
-// extractFileNamePayload returns the resident $FILE_NAME (0x30) attribute value and sequence number from a raw MFT record.
-func extractFileNamePayload(rec []byte) ([]byte, uint16, error) {
+// ExtractFileNamePayload returns the resident $FILE_NAME (0x30) attribute value and sequence number from a raw MFT record.
+func ExtractFileNamePayload(rec []byte) ([]byte, uint16, error) {
 	d := make([]byte, len(rec))
 	copy(d, rec)
 	if err := RemoveFixup(d); err != nil {
@@ -476,7 +476,7 @@ func BuildExtendRecord(baseRec []byte, childRecords map[uint64][]byte) ([]byte, 
 		if !ok || len(crec) == 0 {
 			continue
 		}
-		fnPayload, cseq, err := extractFileNamePayload(crec)
+		fnPayload, cseq, err := ExtractFileNamePayload(crec)
 		if err != nil {
 			return nil, fmt.Errorf("extracting $FILE_NAME for record %d: %w", rnum, err)
 		}

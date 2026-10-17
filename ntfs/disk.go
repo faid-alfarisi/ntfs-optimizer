@@ -174,6 +174,8 @@ func OpenTarget(target string) (syscall.Handle, uint64, bool, error) {
 		letter := string(target[0])
 		openPath = fmt.Sprintf(`\\.\%s:`, letter)
 		isVolume = true
+	} else if len(target) >= 6 && (target[:4] == `\\.\` || target[:4] == `//./`) && target[5] == ':' {
+		isVolume = true
 	}
 
 	pathPtr, err := syscall.UTF16PtrFromString(openPath)
@@ -198,6 +200,8 @@ func OpenTarget(target string) (syscall.Handle, uint64, bool, error) {
 		var bytesRet uint32
 		// Lock volume
 		_ = syscall.DeviceIoControl(h, FSCTL_LOCK_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
+		// Dismount volume to flush cached OS state and allow raw volume writes
+		_ = syscall.DeviceIoControl(h, FSCTL_DISMOUNT_VOLUME, nil, 0, nil, 0, &bytesRet, nil)
 		// Allow raw extended DASD I/O to avoid filesystem boundary restrictions
 		_ = syscall.DeviceIoControl(h, FSCTL_ALLOW_EXTENDED_DASD_IO, nil, 0, nil, 0, &bytesRet, nil)
 	}

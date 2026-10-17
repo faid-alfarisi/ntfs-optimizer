@@ -26,6 +26,7 @@ type VolumeAnalysis struct {
 	MaxAllocRecord    uint64
 	TotalAllocRecords uint64
 	MinMftMB          uint64
+	CompactMinMftMB   uint64
 	CurrentMftMB      uint64
 
 	CurrentMftZoneMB  uint64
@@ -199,6 +200,13 @@ func AnalyzeVolume(h syscall.Handle, target string) (*VolumeAnalysis, error) {
 		analysis.MinMftMB = 1
 	}
 
+	compactedRecordsCount := uint64(43) + analysis.TotalAllocRecords
+	compactMinBytes := compactedRecordsCount * MftRecordSize
+	analysis.CompactMinMftMB = (compactMinBytes + 1024*1024 - 1) / (1024 * 1024)
+	if analysis.CompactMinMftMB == 0 {
+		analysis.CompactMinMftMB = 1
+	}
+
 	// Read Record 2 ($LogFile)
 	rec2Raw, err := ReadAt(h, mftLcn*uint64(clusterSize)+2*MftRecordSize, MftRecordSize)
 	if err == nil {
@@ -253,6 +261,32 @@ func AnalyzeVolume(h syscall.Handle, target string) (*VolumeAnalysis, error) {
 					analysis.VolumeLabel = syscall.UTF16ToString(u16)
 				}
 				off3 += int(alen)
+			}
+		}
+	}
+
+	// Read Record 6 ($Bitmap)
+	rec6Raw, err := ReadAt(h, mftLcn*uint64(clusterSize)+6*MftRecordSize, MftRecordSize)
+	if err == nil {
+		rec6 := make([]byte, MftRecordSize)
+		copy(rec6, rec6Raw)
+		if err := RemoveFixup(rec6); err == nil {
+			off6 := int(binary.LittleEndian.Uint16(rec6[20:22]))
+			for off6+8 <= len(rec6) {
+				atype := binary.LittleEndian.Uint32(rec6[off6 : off6+4])
+				alen := binary.LittleEndian.Uint32(rec6[off6+4 : off6+8])
+				if atype == AttrTypeEnd || alen == 0 || off6+int(alen) > len(rec6) {
+					break
+				}
+				if atype == AttrTypeData && rec6[off6+8] != 0 {
+					analysis.BitmapAllocBytes = binary.LittleEndian.Uint64(rec6[off6+40 : off6+48])
+					ro := int(binary.LittleEndian.Uint16(rec6[off6+32 : off6+34]))
+					analysis.ExistingBmRuns = ParseRunlist(rec6[off6+ro : off6+int(alen)])
+					if len(analysis.ExistingBmRuns) > 0 {
+						analysis.BitmapLcn = analysis.ExistingBmRuns[0].LCN
+					}
+				}
+				off6 += int(alen)
 			}
 		}
 	}

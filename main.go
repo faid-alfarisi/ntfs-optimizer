@@ -33,7 +33,7 @@ func formatSize(bytes uint64) string {
 }
 
 func main() {
-	modeFlag := flag.String("mode", "", "Operation mode: 'rearrange' (non-destructive) or 'format' (destructive)")
+	modeFlag := flag.String("mode", "", "Operation mode: 'compact' (compact MFT), 'rearrange' (rearrange metadata), or 'format' (destructive format)")
 	driveFlag := flag.String("drive", "", "Drive letter to format or rearrange (e.g. F:)")
 	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or F:)")
 	mftSizeFlag := flag.Uint64("mft", 512, "Pre-sized MFT size in MB (default: 512)")
@@ -41,6 +41,7 @@ func main() {
 	objIdSizeFlag := flag.Uint64("objid", 4, "Pre-sized $ObjId:$O:INDEX_ALLOCATION in MB (default: 4)")
 	logFileSizeFlag := flag.Uint64("logfile", 64, "Pre-sized $LogFile in MB (default: 64)")
 	labelFlag := flag.String("label", "New Volume", "Volume label")
+	compactMftFlag := flag.Bool("compact-mft", false, "Reduce MFT size to the absolute minimum after compacting (default: false)")
 	yesFlag := flag.Bool("yes", false, "Skip confirmation prompt")
 	interactiveFlag := flag.Bool("interactive", false, "Force interactive selector")
 
@@ -72,16 +73,20 @@ func main() {
 
 		if mode == "" {
 			fmt.Println(" Select Operation Mode:")
-			fmt.Println("  [1] Rearrange / Optimize Existing NTFS Volume (Non-Destructive)")
-			fmt.Println("  [2] Clean Sequential Format (Destructive)")
+			fmt.Println("  [1] Compact MFT (Non-Destructive)")
+			fmt.Println("  [2] Rearrange / Optimize Existing NTFS Volume (Non-Destructive)")
+			fmt.Println("  [3] Clean Sequential Format (Destructive)")
 			fmt.Println("--------------------------------------------------------------------------")
-			fmt.Print("Choose mode [1 or 2, default: 1]: ")
+			fmt.Print("Choose mode [1, 2, or 3, default: 1]: ")
 			modeInput, _ := reader.ReadString('\n')
 			modeInput = strings.TrimSpace(modeInput)
-			if modeInput == "2" {
-				mode = "format"
-			} else {
+			switch modeInput {
+			case "2":
 				mode = "rearrange"
+			case "3":
+				mode = "format"
+			default:
+				mode = "compact"
 			}
 		}
 
@@ -164,7 +169,7 @@ func main() {
 	}
 
 	if mode == "" {
-		mode = "rearrange"
+		mode = "compact"
 	}
 
 	// Open target
@@ -186,7 +191,81 @@ func main() {
 		fmt.Printf(" -> [%5.1f%%] %s\n", pct, phase)
 	}
 
-	if mode == "rearrange" {
+	if mode == "compact" {
+		// Compact MFT Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures and analyzing MFT record allocation...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		printCompactAnalysisTable(analysis)
+
+		shrinkMft := *compactMftFlag
+		customMftMB := uint64(0)
+
+		if isInteractive {
+			fmt.Println("--------------------------------------------------------------------------")
+			fmt.Print("Reduce MFT size to the absolute minimum after compacting? [y/N, default: N]: ")
+			compactInput, _ := reader.ReadString('\n')
+			compactInput = strings.ToLower(strings.TrimSpace(compactInput))
+			if compactInput == "yes" || compactInput == "y" {
+				shrinkMft = true
+				customMftMB = analysis.CompactMinMftMB
+				fmt.Printf("[+] $MFT size will be reduced to absolute minimum: %d MB\n", customMftMB)
+			} else {
+				shrinkMft = false
+				customMftMB = promptUintWithMin(reader, "Pre-size for $MFT (MB)", analysis.CurrentMftMB, analysis.CompactMinMftMB)
+			}
+		} else {
+			if shrinkMft {
+				customMftMB = analysis.CompactMinMftMB
+			} else if *mftSizeFlag >= analysis.CompactMinMftMB {
+				customMftMB = *mftSizeFlag
+			} else {
+				customMftMB = analysis.CurrentMftMB
+			}
+		}
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: IN-PLACE MFT COMPACTION WILL FILL GAPS AND RELOCATE MFT RECORDS")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'yes' to confirm and proceed with compacting: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
+				fmt.Println("\n[*] Compaction aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting Non-Destructive In-Place MFT Compaction...")
+		err = ntfs.CompactVolumeMFT(h, analysis, shrinkMft, customMftMB, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] MFT Compaction failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! MFT records compacted into contiguous front layout with zero gaps.")
+		fmt.Println("[+] All existing user files and directory trees preserved intact.")
+
+	} else if mode == "rearrange" {
 		// Rearrange Mode (Non-destructive)
 		fmt.Println("[*] Inspecting existing volume structures and calculating minimum required sizes...")
 		analysis, err := ntfs.AnalyzeVolume(h, target)
@@ -365,11 +444,30 @@ func printBanner() {
 	fmt.Println("      CUSTOM SEQUENTIAL NTFS OPTIMIZER & FORMATTER (Go Native)            ")
 	fmt.Println("==========================================================================")
 	fmt.Println(" Features:")
-	fmt.Println("  - Mode [1]: Rearrange / Optimize existing volume (Preserves files)")
-	fmt.Println("  - Mode [2]: Clean sequential format (Zero-fragmentation layout)")
+	fmt.Println("  - Mode [1]: Compact MFT (Fill gaps in-place, non-destructive)")
+	fmt.Println("  - Mode [2]: Rearrange / Optimize existing volume (Preserves files)")
+	fmt.Println("  - Mode [3]: Clean sequential format (Zero-fragmentation layout)")
 	fmt.Println("  - Unmovable NTFS Metadata in sequential front order")
 	fmt.Println("  - Pre-sized $MFT, MFT RESERVED AREA, and $ObjId:$O:INDEX_ALLOCATION")
 	fmt.Println("  - Root directory with 'Everyone' Full Access permissions")
+	fmt.Println("==========================================================================")
+}
+
+func printCompactAnalysisTable(a *ntfs.VolumeAnalysis) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("                   CURRENT VOLUME MFT RECORD STATUS                       ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Total Capacity         : %s (%d clusters, %d sectors)\n",
+		formatSize(a.TotalBytes), a.TotalClusters, a.TotalSectors)
+	fmt.Printf(" Cluster Size           : %d bytes\n", a.ClusterSize)
+	fmt.Printf(" Total Allocated Records: %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Printf(" %-24s %-16s %-16s\n", "Structure", "Current Size", "Compacted Minimum")
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Printf(" %-24s %-16s %-16s\n", "$MFT", fmt.Sprintf("%d MB", a.CurrentMftMB), fmt.Sprintf("%d MB", a.CompactMinMftMB))
 	fmt.Println("==========================================================================")
 }
 
