@@ -16,6 +16,7 @@ Standard Windows NTFS formatting and routine disk usage scatter unmovable system
 - **Reset $Secure Streams & Security IDs (Non-Destructive)**: Recreates `$Secure` (`$SDS`, `$SDH`, and `$SII`) cleanly with the active user's SID, verifies all MFT records, and repairs any non-existent or corrupted Security IDs using the official path/file mapping list.
 - **Reset $ObjId & Clear Index (Non-Destructive)**: Strips `$OBJECT_ID` attributes from all MFT records (acting like an ultra-fast bulk `fsutil objectid delete`) and resets the `$ObjId:$O` B-tree root to an empty leaf without shrinking the pre-allocated index clusters.
 - **Combined Metadata Reset (Non-Destructive)**: Recreates `$Secure` and clears `$ObjId` simultaneously in a single, high-speed unified pass.
+- **Repair Volume & Clear Dirty Bit (Non-Destructive)**: In-place native volume consistency doctor that marks dirty disks as clean, resets `$LogFile` uncommitted transactions, verifies MFT records and `$Bitmap` allocation, and updates `$I30` sequence numbers without running Windows `chkdsk`, without creating `chkdsk.log`, without moving metadata, and without pruning `$Secure` descriptors.
 - **Custom Sequential Formatter (Clean/Destructive)**: Direct low-level NTFS volume formatting with custom pre-allocated sizes for `$MFT`, MFT Reserved Zone, `$LogFile`, and `$ObjId`, setting root directory permissions to Full Access for `Everyone`.
 - **Interactive & CLI Modes**: Clean, intuitive terminal menu interface with auto-detected drive listings and safety prompts, or fully automatable command-line flags.
 
@@ -101,7 +102,19 @@ When formatting or rearranging a volume, **NTFS Optimizer** places system struct
 ### 5. Reset Both $Secure & $ObjId (Non-Destructive)
 - **Goal**: Run both metadata reset operations in a single coordinated, high-speed execution.
 
-### 6. Clean Sequential Format (Destructive)
+### 6. Repair Volume & Clear Dirty Bit (Non-Destructive)
+- **Goal**: Clear the volume dirty bit, mark the volume clean, and perform native file system consistency checks without invoking Windows `chkdsk`.
+- **Why avoid Windows CHKDSK?**:
+  - `chkdsk /f` alters custom metadata layout, prunes custom security descriptors from `$Secure`, shuffles files, resets directory clusters, and creates `chkdsk.log` or `$Extend\$RmMetadata\$TxfLog` junk files.
+- **How it works**:
+  - **Clears Dirty Bit & Flags in Record 3 (`$Volume`)**: Clears `VOLUME_IS_DIRTY` (`0x0001`), `VOLUME_CHKDSK_UNDERWAY` (`0x0040`), `VOLUME_REPAIR_OBJECT_ID` (`0x0020`), and `VOLUME_MODIFIED_BY_CHKDSK` (`0x8000`) in the `$VOLUME_INFORMATION` attribute.
+  - **Resets `$LogFile` Restart Pages**: Fills uncommitted transaction restart areas with `0xFF` so the Windows NTFS kernel driver sees a 100% clean log on mount and does not re-flag the disk dirty or schedule `autochk` on reboot.
+  - **MFT Record & Security ID Verification**: Scans all active MFT records in-place, validates USA fixups, and fixes missing/invalid Security IDs using the path mapping baseline.
+  - **Reconciles Cluster Allocation (`$Bitmap`)**: Verifies that all clusters used by system metadata (`$Boot`, `$MFT`, `$LogFile`, `$Bitmap`, `$Secure`, `$ObjId`, etc.) and active file runs are marked allocated in `$Bitmap`.
+  - **Validates Directory Indices (`$I30`)**: Traverses resident and non-resident `$I30` entries, repairing mismatched sequence numbers in-place.
+  - **Guarantees**: Zero metadata movement, zero `$Secure` descriptor pruning, and NO `chkdsk.log` or recovery folders created.
+
+### 7. Clean Sequential Format (Destructive)
 - **Goal**: Initialize a new partition or physical drive with zero metadata fragmentation from day one.
 - **How it works**:
   - Writes a standard NTFS VBR and boot sector with an aligned backup sector at the volume end.
@@ -213,17 +226,22 @@ Flags:
 .\ntfs-optimizer.exe -mode reset-both -drive F: -yes
 ```
 
-**4. Compact MFT records on drive `E:` and shrink MFT to minimum:**
+**4. Repair volume integrity and clear dirty bit without running Windows chkdsk:**
+```powershell
+.\ntfs-optimizer.exe -mode repair -drive F: -yes
+```
+
+**5. Compact MFT records on drive `E:` and shrink MFT to minimum:**
 ```powershell
 .\ntfs-optimizer.exe -mode compact -drive E: -compact-mft -yes
 ```
 
-**5. Rearrange existing volume `G:` with custom pre-sized MFT:**
+**6. Rearrange existing volume `G:` with custom pre-sized MFT:**
 ```powershell
 .\ntfs-optimizer.exe -mode rearrange -drive G: -mft 1024 -mft-zone 400 -yes
 ```
 
-**6. Perform a clean sequential format on drive `F:` with label "Storage":**
+**7. Perform a clean sequential format on drive `F:` with label "Storage":**
 ```powershell
 .\ntfs-optimizer.exe -mode format -drive F: -label "Storage" -mft 512 -logfile 64 -yes
 ```

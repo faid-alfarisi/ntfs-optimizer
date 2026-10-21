@@ -35,7 +35,7 @@ func formatSize(bytes uint64) string {
 }
 
 func main() {
-	modeFlag := flag.String("mode", "", "Operation mode: 'compact', 'rearrange', 'reset-secure', 'reset-objid', 'reset-both', or 'format'")
+	modeFlag := flag.String("mode", "", "Operation mode: 'compact', 'rearrange', 'reset-secure', 'reset-objid', 'reset-both', 'repair', or 'format'")
 	driveFlag := flag.String("drive", "", "Drive letter to format or rearrange (e.g. F:)")
 	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or F:)")
 	mftSizeFlag := flag.Uint64("mft", 512, "Pre-sized MFT size in MB (default: 512)")
@@ -86,9 +86,10 @@ func main() {
 			fmt.Println("  [3] Reset $Secure (Non-Destructive - Recreate SDS/SDH/SII & restore Security IDs)")
 			fmt.Println("  [4] Reset $ObjId (Non-Destructive - Delete Object IDs & wipe $ObjId:$O index)")
 			fmt.Println("  [5] Reset Both $Secure & $ObjId (Non-Destructive - Combined metadata reset)")
-			fmt.Println("  [6] Clean Sequential Format (Destructive - Fresh low-level format)")
+			fmt.Println("  [6] Repair Volume & Clear Dirty Bit (Non-Destructive - Fix without chkdsk)")
+			fmt.Println("  [7] Clean Sequential Format (Destructive - Fresh low-level format)")
 			fmt.Println("--------------------------------------------------------------------------")
-			fmt.Print("Choose mode [1-6, default: 1]: ")
+			fmt.Print("Choose mode [1-7, default: 1]: ")
 			modeInput, _ := reader.ReadString('\n')
 			modeInput = strings.TrimSpace(modeInput)
 			switch modeInput {
@@ -101,6 +102,8 @@ func main() {
 			case "5":
 				mode = "reset-both"
 			case "6":
+				mode = "repair"
+			case "7":
 				mode = "format"
 			default:
 				mode = "compact"
@@ -115,6 +118,8 @@ func main() {
 			mode = "reset-objid"
 		case "reset", "both", "reset-all", "reset-both":
 			mode = "reset-both"
+		case "repair", "fix", "clear-dirty", "clean", "doctor", "chkdsk":
+			mode = "repair"
 		}
 
 		// 1. List targets
@@ -203,6 +208,8 @@ func main() {
 		mode = "reset-objid"
 	case "reset", "both", "reset-all", "reset-both":
 		mode = "reset-both"
+	case "repair", "fix", "clear-dirty", "clean", "doctor", "chkdsk":
+		mode = "repair"
 	case "":
 		mode = "compact"
 	}
@@ -562,6 +569,71 @@ func main() {
 		fmt.Printf(" - Object IDs Removed      : %d\n", res.ObjIdResult.ObjIdsRemoved)
 		fmt.Println("[+] All existing user files and directory trees preserved intact.")
 
+	} else if mode == "repair" {
+		// Repair & Clear Dirty Bit Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures and dirty state...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		printRepairTable(analysis)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" NATIVE VOLUME REPAIR & DIRTY BIT CLEAR (NON-DESTRUCTIVE)")
+			fmt.Printf(" Target: %s (%s, Label: %s)\n", target, formatSize(totalBytes), analysis.VolumeLabel)
+			fmt.Println(" - Clears volume dirty bit and chkdsk flags in Record 3 ($Volume)")
+			fmt.Println(" - Resets $LogFile transaction restart pages to clean state")
+			fmt.Println(" - Validates MFT records, Security IDs, and $Bitmap consistency in-place")
+			fmt.Println(" - Validates $I30 directory index sequence numbers")
+			fmt.Println(" - Zero metadata shifting, zero $Secure purging, NO chkdsk.log created")
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'yes' to confirm and proceed with repair: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
+				fmt.Println("\n[*] Repair operation aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting Native Volume Repair & Dirty Bit Clear...")
+		res, err := ntfs.RepairVolume(h, analysis, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Repair operation failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! Volume repaired and marked clean.")
+		dirtyStatus := "Already Clean"
+		if res.WasDirty {
+			dirtyStatus = "Dirty -> Cleared & Marked Clean"
+		}
+		fmt.Printf(" - Volume Dirty State     : %s\n", dirtyStatus)
+		fmt.Printf(" - $LogFile Restart Area  : Reset to clean state (0xFF)\n")
+		fmt.Printf(" - MFT Records Checked    : %d\n", res.RecordsChecked)
+		fmt.Printf(" - MFT Records Repaired   : %d\n", res.RecordsRepaired)
+		fmt.Printf(" - Security IDs Restored  : %d\n", res.SecIDsRepaired)
+		fmt.Printf(" - $Bitmap Clusters Fixed : %d\n", res.BitmapMismatchesFixed)
+		fmt.Printf(" - Directory Indices Checked: %d\n", res.IndicesChecked)
+		fmt.Printf(" - Index Entries Fixed    : %d\n", res.IndexEntriesFixed)
+		fmt.Println("[+] Windows will now recognize the drive as 100% clean without prompting chkdsk.")
+
 	} else {
 		// Format Mode (Destructive)
 		if isInteractive {
@@ -646,7 +718,7 @@ func printBanner() {
 	fmt.Println("==========================================================================")
 	fmt.Println(" Features:")
 	fmt.Println("  - Optimization : Compact MFT & Rearrange metadata contiguously")
-	fmt.Println("  - Maintenance  : Reset $Secure (SDS/SDH/SII) & Reset $ObjId (O:Index)")
+	fmt.Println("  - Maintenance  : Reset $Secure, Reset $ObjId & Repair/Clear Dirty Bit")
 	fmt.Println("  - Formatting   : Clean sequential low-level NTFS format")
 	fmt.Println("  - Unmovable NTFS Metadata in sequential front order")
 	fmt.Println("  - Pre-sized $MFT, MFT RESERVED AREA, and $ObjId:$O:INDEX_ALLOCATION")
@@ -807,6 +879,24 @@ func promptUintWithMin(r *bufio.Reader, label string, defaultVal uint64, minVal 
 		}
 		return val
 	}
+}
+
+func printRepairTable(a *ntfs.VolumeAnalysis) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("              NATIVE VOLUME REPAIR & DIRTY BIT INSPECTION                ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Total Capacity         : %s (%d clusters, %d sectors)\n",
+		formatSize(a.TotalBytes), a.TotalClusters, a.TotalSectors)
+	fmt.Printf(" Cluster Size           : %d bytes\n", a.ClusterSize)
+	fmt.Printf(" Total Records in MFT   : %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Printf(" $LogFile Size          : %d MB (LCN: %d)\n", a.CurrentLogFileMB, a.LogFileLcn)
+	fmt.Printf(" Volume Bitmap Location : LCN %d (%s)\n", a.BitmapLcn, formatSize(a.BitmapAllocBytes))
+	fmt.Println(" Action                 : Clear Dirty Bit, Reset $LogFile, Validate MFT & Indices")
+	fmt.Println(" Integrity Guarantee   : Non-destructive, preserve metadata layout & $Secure")
+	fmt.Println("--------------------------------------------------------------------------")
 }
 
 func promptUint(r *bufio.Reader, label string, defaultVal uint64) uint64 {
