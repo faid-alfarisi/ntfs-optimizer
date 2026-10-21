@@ -1,0 +1,45 @@
+{
+  "RT_GROUP_ICON": {
+    "#1": {
+      "0000": "icon.ico"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "ntfs-optimizer",
+          "version": "1.2.0.0"
+        },
+        "description": "NTFS Direct Disk Optimizer & Metadata Engine",
+        "minimum-os": "win7",
+        "execution-level": "require administrator",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "long-path-aware": true,
+        "use-common-controls-v6": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "1.2.0.0",
+          "product_version": "1.2.0.0"
+        },
+        "info": {
+          "0409": {
+            "FileDescription": "NTFS Direct Disk Optimizer & Metadata Engine",
+            "FileVersion": "1.2.0.0",
+            "InternalName": "ntfs-optimizer",
+            "OriginalFilename": "ntfs-optimizer.exe",
+            "ProductName": "NTFS Optimizer",
+            "ProductVersion": "1.2"
+          }
+        }
+      }
+    }
+  }
+}

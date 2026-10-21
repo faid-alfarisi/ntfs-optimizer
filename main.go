@@ -11,6 +11,8 @@ import (
 	"ntfs-optimizer/ntfs"
 )
 
+const AppVersion = "1.2"
+
 func formatSize(bytes uint64) string {
 	const (
 		KB = 1024
@@ -33,7 +35,7 @@ func formatSize(bytes uint64) string {
 }
 
 func main() {
-	modeFlag := flag.String("mode", "", "Operation mode: 'compact' (compact MFT), 'rearrange' (rearrange metadata), or 'format' (destructive format)")
+	modeFlag := flag.String("mode", "", "Operation mode: 'compact', 'rearrange', 'reset-secure', 'reset-objid', 'reset-both', or 'format'")
 	driveFlag := flag.String("drive", "", "Drive letter to format or rearrange (e.g. F:)")
 	targetFlag := flag.String("target", "", "Target volume or physical drive (e.g. \\\\.\\PhysicalDrive1 or F:)")
 	mftSizeFlag := flag.Uint64("mft", 512, "Pre-sized MFT size in MB (default: 512)")
@@ -44,8 +46,14 @@ func main() {
 	compactMftFlag := flag.Bool("compact-mft", false, "Reduce MFT size to the absolute minimum after compacting (default: false)")
 	yesFlag := flag.Bool("yes", false, "Skip confirmation prompt")
 	interactiveFlag := flag.Bool("interactive", false, "Force interactive selector")
+	versionFlag := flag.Bool("version", false, "Print version information and exit")
 
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("NTFS Optimizer v%s\n", AppVersion)
+		return
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -73,21 +81,40 @@ func main() {
 
 		if mode == "" {
 			fmt.Println(" Select Operation Mode:")
-			fmt.Println("  [1] Compact MFT (Non-Destructive)")
-			fmt.Println("  [2] Rearrange / Optimize Existing NTFS Volume (Non-Destructive)")
-			fmt.Println("  [3] Clean Sequential Format (Destructive)")
+			fmt.Println("  [1] Compact MFT (Non-Destructive - Fill gaps, shrink MFT)")
+			fmt.Println("  [2] Rearrange / Optimize Volume Metadata (Non-Destructive - Sequential layout)")
+			fmt.Println("  [3] Reset $Secure (Non-Destructive - Recreate SDS/SDH/SII & restore Security IDs)")
+			fmt.Println("  [4] Reset $ObjId (Non-Destructive - Delete Object IDs & wipe $ObjId:$O index)")
+			fmt.Println("  [5] Reset Both $Secure & $ObjId (Non-Destructive - Combined metadata reset)")
+			fmt.Println("  [6] Clean Sequential Format (Destructive - Fresh low-level format)")
 			fmt.Println("--------------------------------------------------------------------------")
-			fmt.Print("Choose mode [1, 2, or 3, default: 1]: ")
+			fmt.Print("Choose mode [1-6, default: 1]: ")
 			modeInput, _ := reader.ReadString('\n')
 			modeInput = strings.TrimSpace(modeInput)
 			switch modeInput {
 			case "2":
 				mode = "rearrange"
 			case "3":
+				mode = "reset-secure"
+			case "4":
+				mode = "reset-objid"
+			case "5":
+				mode = "reset-both"
+			case "6":
 				mode = "format"
 			default:
 				mode = "compact"
 			}
+		}
+
+		// Normalize aliases
+		switch mode {
+		case "secure", "sds", "reset-secure":
+			mode = "reset-secure"
+		case "objid", "oid", "reset-objid":
+			mode = "reset-objid"
+		case "reset", "both", "reset-all", "reset-both":
+			mode = "reset-both"
 		}
 
 		// 1. List targets
@@ -168,7 +195,15 @@ func main() {
 		fmt.Printf("\n[+] Selected: %s\n", selectedChoice.DisplayName)
 	}
 
-	if mode == "" {
+	// Normalize aliases for CLI flags
+	switch mode {
+	case "secure", "sds", "reset-secure":
+		mode = "reset-secure"
+	case "objid", "oid", "reset-objid":
+		mode = "reset-objid"
+	case "reset", "both", "reset-all", "reset-both":
+		mode = "reset-both"
+	case "":
 		mode = "compact"
 	}
 
@@ -361,6 +396,172 @@ func main() {
 		fmt.Println("\n[+] SUCCESS! NTFS Volume metadata rearranged into exact sequential front layout.")
 		fmt.Println("[+] All existing user files and directory trees preserved intact.")
 
+	} else if mode == "reset-secure" {
+		// Reset $Secure Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures and analyzing $Secure streams...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		userSID := ntfs.GetCurrentUserSID()
+		printResetSecureTable(analysis, userSID)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: IN-PLACE $SECURE RESET WILL RECREATE SDS/SDH/SII STREAMS")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Printf(" - Active User SID : %s\n", userSID)
+			fmt.Println(" - Any unmatched Security ID will be updated according to security list")
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'yes' to confirm and proceed with resetting $Secure: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
+				fmt.Println("\n[*] $Secure reset aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting In-Place $Secure Recreation & Security ID Verification...")
+		res, err := ntfs.ResetSecure(h, analysis, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Reset $Secure failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! $Secure streams recreated and Security IDs verified.")
+		fmt.Printf(" - Active User SID Applied : %s\n", res.UserSID)
+		fmt.Printf(" - $SDS Stream Location    : LCN %d (%d clusters / 260 KB)\n", res.SdsLcn, res.SdsClusters)
+		fmt.Printf(" - $SDH / $SII Allocations : LCN %d / %d (sorted index blocks)\n", res.SdhLcn, res.SiiLcn)
+		fmt.Printf(" - Total Records Scanned   : %d\n", res.TotalRecordsScanned)
+		fmt.Printf(" - Security IDs Repaired   : %d (Updated to valid list)\n", res.RecordsUpdated)
+		fmt.Println("[+] All existing user files and directory trees preserved intact.")
+
+	} else if mode == "reset-objid" {
+		// Reset $ObjId Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures and analyzing $ObjId:$O allocation...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		printResetObjIdTable(analysis)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: IN-PLACE $OBJID RESET WILL REMOVE ALL OBJECT IDS FROM RECORDS")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Println(" - $ObjId:$O Index blocks will be cleared")
+			fmt.Println(" - Existing $ObjId cluster allocation will NOT be shrunk (preserved as-is)")
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'yes' to confirm and proceed with resetting $ObjId: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
+				fmt.Println("\n[*] $ObjId reset aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting In-Place $ObjId Reset...")
+		res, err := ntfs.ResetObjId(h, analysis, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Reset $ObjId failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! Object IDs reset across volume.")
+		fmt.Printf(" - Record 25 ($ObjId)      : $INDEX_ROOT '$O' reset to empty leaf\n")
+		fmt.Printf(" - Allocation Preserved    : %s (%d clusters / no shrinking)\n", formatSize(res.ObjIdBytesPreserved), res.ObjIdClusters)
+		fmt.Printf(" - Total Records Scanned   : %d\n", res.TotalRecordsScanned)
+		fmt.Printf(" - Object IDs Removed      : %d (Stripped from MFT records)\n", res.ObjIdsRemoved)
+		fmt.Println("[+] All existing user files and directory trees preserved intact.")
+
+	} else if mode == "reset-both" {
+		// Reset Both $Secure & $ObjId Mode (Non-destructive)
+		fmt.Println("[*] Inspecting existing volume structures for metadata reset...")
+		analysis, err := ntfs.AnalyzeVolume(h, target)
+		if err != nil {
+			fmt.Printf("[-] Volume analysis failed: %v\n", err)
+			ntfs.CloseTarget(h, isVol)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		userSID := ntfs.GetCurrentUserSID()
+		printResetCombinedTable(analysis, userSID)
+
+		if !*yesFlag {
+			fmt.Println("\n==========================================================================")
+			fmt.Println(" WARNING: IN-PLACE RESET OF BOTH $SECURE AND $OBJID METADATA")
+			fmt.Printf(" Target: %s (%s)\n", target, formatSize(totalBytes))
+			fmt.Printf(" - Active User SID : %s\n", userSID)
+			fmt.Println(" - Recreates $Secure streams (SDS/SDH/SII) and maps missing Security IDs")
+			fmt.Println(" - Removes Object IDs from all records and clears $ObjId:$O (no shrinking)")
+			fmt.Println("==========================================================================")
+			fmt.Print("Type 'yes' to confirm and proceed with combined reset: ")
+			confirm, _ := reader.ReadString('\n')
+			confirm = strings.ToLower(strings.TrimSpace(confirm))
+			if confirm != "yes" && confirm != "y" {
+				fmt.Println("\n[*] Combined reset aborted by user.")
+				ntfs.CloseTarget(h, isVol)
+				if isInteractive {
+					pauseAndExit(reader)
+				}
+				return
+			}
+		}
+
+		fmt.Println("\n[*] Starting In-Place Reset of $Secure and $ObjId...")
+		res, err := ntfs.ResetBoth(h, analysis, progress)
+		ntfs.CloseTarget(h, isVol)
+
+		if err != nil {
+			fmt.Printf("\n[-] Combined reset failed: %v\n", err)
+			if isInteractive {
+				pauseAndExit(reader)
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println("\n[+] SUCCESS! Both $Secure and $ObjId reset successfully.")
+		fmt.Printf(" - $SDS Stream Location    : LCN %d (%d clusters / 260 KB)\n", res.SecureResult.SdsLcn, res.SecureResult.SdsClusters)
+		fmt.Printf(" - Security IDs Repaired   : %d\n", res.SecureResult.RecordsUpdated)
+		fmt.Printf(" - $ObjId Allocation       : %s (%d clusters preserved)\n", formatSize(res.ObjIdResult.ObjIdBytesPreserved), res.ObjIdResult.ObjIdClusters)
+		fmt.Printf(" - Object IDs Removed      : %d\n", res.ObjIdResult.ObjIdsRemoved)
+		fmt.Println("[+] All existing user files and directory trees preserved intact.")
+
 	} else {
 		// Format Mode (Destructive)
 		if isInteractive {
@@ -441,12 +642,12 @@ func main() {
 
 func printBanner() {
 	fmt.Println("==========================================================================")
-	fmt.Println("      CUSTOM SEQUENTIAL NTFS OPTIMIZER & FORMATTER (Go Native)            ")
+	fmt.Printf("   NTFS OPTIMIZER v%-6s - DIRECT DISK SEQUENTIAL ENGINE & FORMATTER\n", AppVersion)
 	fmt.Println("==========================================================================")
 	fmt.Println(" Features:")
-	fmt.Println("  - Mode [1]: Compact MFT (Fill gaps in-place, non-destructive)")
-	fmt.Println("  - Mode [2]: Rearrange / Optimize existing volume (Preserves files)")
-	fmt.Println("  - Mode [3]: Clean sequential format (Zero-fragmentation layout)")
+	fmt.Println("  - Optimization : Compact MFT & Rearrange metadata contiguously")
+	fmt.Println("  - Maintenance  : Reset $Secure (SDS/SDH/SII) & Reset $ObjId (O:Index)")
+	fmt.Println("  - Formatting   : Clean sequential low-level NTFS format")
 	fmt.Println("  - Unmovable NTFS Metadata in sequential front order")
 	fmt.Println("  - Pre-sized $MFT, MFT RESERVED AREA, and $ObjId:$O:INDEX_ALLOCATION")
 	fmt.Println("  - Root directory with 'Everyone' Full Access permissions")
@@ -468,6 +669,57 @@ func printCompactAnalysisTable(a *ntfs.VolumeAnalysis) {
 	fmt.Printf(" %-24s %-16s %-16s\n", "Structure", "Current Size", "Compacted Minimum")
 	fmt.Println("--------------------------------------------------------------------------")
 	fmt.Printf(" %-24s %-16s %-16s\n", "$MFT", fmt.Sprintf("%d MB", a.CurrentMftMB), fmt.Sprintf("%d MB", a.CompactMinMftMB))
+	fmt.Println("==========================================================================")
+}
+
+func printResetSecureTable(a *ntfs.VolumeAnalysis, userSID string) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("                   $SECURE METADATA CONFIGURATION                         ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Active User SID        : %s\n", userSID)
+	fmt.Printf(" Total Allocated Records: %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Println(" $Secure Plan           : Recreate $SDS (260 KB), $SDH (4 KB), $SII (4 KB)")
+	fmt.Println(" Security ID Policy     : Verified against valid set (SecIDs 256..271)")
+	fmt.Println(" Mapped IDs from list   : Root system files, $Extend, $Recycle.Bin, SVI,")
+	fmt.Println("                          Standard Folder (267), Standard File (268),")
+	fmt.Println("                          IMAGELOAD (269), Auslogics Temp (270)")
+	fmt.Println("==========================================================================")
+}
+
+func printResetObjIdTable(a *ntfs.VolumeAnalysis) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("                    $OBJID METADATA CONFIGURATION                         ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Total Allocated Records: %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Printf(" Current $ObjId Size    : %d MB (%d clusters)\n",
+		a.CurrentObjIdMB, a.ObjIdAllocBytes/uint64(a.ClusterSize))
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Println(" Action                 : Remove ObjectID attributes (0x40) from all records")
+	fmt.Println(" Index Reset            : Wipe $ObjId:$O allocation & reset root to empty leaf")
+	fmt.Println(" Allocation Policy      : Preserved intact (No shrinking)")
+	fmt.Println("==========================================================================")
+}
+
+func printResetCombinedTable(a *ntfs.VolumeAnalysis, userSID string) {
+	fmt.Println("\n==========================================================================")
+	fmt.Println("             COMBINED $SECURE & $OBJID METADATA RESET                     ")
+	fmt.Println("==========================================================================")
+	fmt.Printf(" Target Volume          : %s\n", a.Target)
+	fmt.Printf(" Current Volume Label   : %s\n", a.VolumeLabel)
+	fmt.Printf(" Active User SID        : %s\n", userSID)
+	fmt.Printf(" Total Allocated Records: %d (Highest Record ID: #%d)\n",
+		a.TotalAllocRecords, a.MaxAllocRecord)
+	fmt.Printf(" Current $ObjId Size    : %d MB (Allocation preserved intact)\n", a.CurrentObjIdMB)
+	fmt.Println("--------------------------------------------------------------------------")
+	fmt.Println(" 1. $Secure             : Recreate SDS/SDH/SII & restore Security IDs")
+	fmt.Println(" 2. $ObjId              : Remove Object IDs & clear $ObjId:$O (no shrinking)")
 	fmt.Println("==========================================================================")
 }
 
