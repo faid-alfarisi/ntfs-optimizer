@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"ntfs-optimizer/gui"
 	"ntfs-optimizer/ntfs"
 )
 
@@ -47,11 +48,19 @@ func main() {
 	yesFlag := flag.Bool("yes", false, "Skip confirmation prompt")
 	interactiveFlag := flag.Bool("interactive", false, "Force interactive selector")
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	guiFlag := flag.Bool("gui", false, "Launch modern desktop GUI interface")
+	cliFlag := flag.Bool("cli", false, "Force terminal CLI interface")
 
 	flag.Parse()
 
 	if *versionFlag {
 		fmt.Printf("NTFS Optimizer v%s\n", AppVersion)
+		return
+	}
+
+	// Default to desktop GUI on double-click or when -gui flag is passed
+	if !*cliFlag && (*guiFlag || len(os.Args) == 1) {
+		gui.RunGUI()
 		return
 	}
 

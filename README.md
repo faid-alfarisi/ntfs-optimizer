@@ -18,7 +18,7 @@ Standard Windows NTFS formatting and routine disk usage scatter unmovable system
 - **Combined Metadata Reset (Non-Destructive)**: Recreates `$Secure` and clears `$ObjId` simultaneously in a single, high-speed unified pass.
 - **Repair Volume & Clear Dirty Bit (Non-Destructive)**: In-place native volume consistency doctor that marks dirty disks as clean, resets `$LogFile` uncommitted transactions, verifies MFT records and `$Bitmap` allocation, and updates `$I30` sequence numbers without running Windows `chkdsk`, without creating `chkdsk.log`, without moving metadata, and without pruning `$Secure` descriptors.
 - **Custom Sequential Formatter (Clean/Destructive)**: Direct low-level NTFS volume formatting with custom pre-allocated sizes for `$MFT`, MFT Reserved Zone, `$LogFile`, and `$ObjId`, setting root directory permissions to Full Access for `Everyone`.
-- **Interactive & CLI Modes**: Clean, intuitive terminal menu interface with auto-detected drive listings and safety prompts, or fully automatable command-line flags.
+- **Native Win32 GUI & Dual-Mode CLI**: Authentic, lightweight Windows desktop GUI built with native Win32 Common Controls v6 (like Rufus, 7-Zip, or Process Hacker) with anti-aliased Segoe UI typography, real-time volume health/dirty status, dynamic option toggles, native progress bar (`msctls_progress32`), and streaming log console. Double-click to launch the native GUI, or use CLI flags for headless automation.
 
 ---
 
@@ -151,31 +151,28 @@ Double-click or run:
 
 ## How to Use
 
-> [!IMPORTANT]
-> Always run your command prompt or terminal **as Administrator**. Ensure that open applications or explorer windows are not actively locking files on the target drive before operating on it.
+### 1. Native Windows GUI (Default on Double-Click)
 
-### Interactive Mode (Recommended)
+Simply **double-click** `ntfs-optimizer.exe` in Windows File Explorer!
+- Thanks to the embedded application manifest, Windows prompts for Administrator elevation automatically.
+- Launches a native Windows Win32 utility window with native Common Controls v6 (like Rufus, 7-Zip, or Process Hacker):
+  - **Device Dropdown (`COMBOBOX`)**: Auto-detects all online volumes, showing label, capacity, and real-time **Dirty / Clean** status.
+  - **Native Radio Controls**: One-click switching between all 7 optimization, reset, repair, and format modes.
+  - **Dynamic Parameters**: Automatically enables/disables MFT sizes, log sizes, labels, and compaction options based on the chosen mode.
+  - **Native Progress Bar (`msctls_progress32`)**: Real-time progress updates with smooth scrolling.
+  - **Live Log Viewer**: Multi-line scrollable log console detailing every step of the low-level disk operations.
 
-Simply run the executable without flags:
-
+You can also launch the GUI explicitly from terminal:
 ```powershell
-.\ntfs-optimizer.exe
+.\ntfs-optimizer.exe -gui
 ```
 
-The tool will display a guided menu:
-```text
- Select Operation Mode:
-  [1] Compact MFT                                (Non-Destructive - Fill gaps, shrink MFT)
-  [2] Rearrange / Optimize Volume Metadata       (Non-Destructive - Sequential layout)
-  [3] Reset $Secure (Security Descriptors)       (Non-Destructive - Recreate SDS/SDH/SII)
-  [4] Reset $ObjId (Object Identifiers)          (Non-Destructive - Clear Object IDs & $ObjId:$O)
-  [5] Reset Both $Secure & $ObjId                (Non-Destructive - Combined metadata reset)
-  [6] Clean Sequential Format                    (Destructive     - Fresh low-level format)
+### 2. Interactive Terminal CLI
+
+Run with the `-cli` flag to launch the text-mode interactive menu:
+```powershell
+.\ntfs-optimizer.exe -cli
 ```
-1. Choose an operation mode (`1`–`6`).
-2. Select your target drive from the auto-detected list of online volumes.
-3. Review the current metadata metrics and layout preview.
-4. Confirm the operation to proceed.
 
 ---
 
@@ -246,7 +243,7 @@ Flags:
 .\ntfs-optimizer.exe -mode format -drive F: -label "Storage" -mft 512 -logfile 64 -yes
 ```
 
----
+a---
 
 ## Administrator Privileges & Double-Click Elevation
 
